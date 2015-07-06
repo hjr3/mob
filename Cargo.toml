@@ -1,0 +1,15 @@
+[package]
+name = "mob"
+version = "0.1.0"
+authors = ["Herman J. Radtke III <hermanradtke@gmail.com>"]
+
+[dependencies]
+log = "0.3.1"
+env_logger = "0.3.1"
+
+[dependencies.mio]
+git = "https://github.com/carllerche/mio"
+
+[[bin]]
+name = "mob-server"
+path = "src/main.rs"
