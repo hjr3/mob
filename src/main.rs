@@ -32,7 +32,9 @@ struct Connection {
     // _again_ during the next even loop tick. by that next tick, the kernel
     // should have drained some of the send buffer.
     // see: http://stackoverflow.com/a/13568962/775246
-    interest: Interest
+    interest: Interest,
+
+    send_queue: Vec<String>,
 }
 
 impl Connection {
@@ -43,6 +45,8 @@ impl Connection {
 
             // new connections are hung up when they are first created
             interest: Interest::hup(),
+
+            send_queue: Vec::new(),
         }
     }
 
@@ -52,12 +56,12 @@ impl Connection {
     // then the mio library could not mutate it further.
     //
     // idea: pretty sure we should use a closure here instead, like thread::scoped
-    fn readable(&mut self, event_loop: &mut EventLoop<MyHandler>) -> io::Result<()> {
+    fn readable(&mut self, event_loop: &mut EventLoop<MyHandler>) -> io::Result<String> {
         // there are more advanced buffers we can create, but to reduce
         // cognitive load while we learn how this all works, use this
         // naive buffer
         let mut buf = [0u8; 1024];
-        let mut echo = false;
+        let mut bytes = 0;
 
         // we are EPOLLET and EPOLLONESHOT, so we _must_ drain the entire
         // socket receive buffer, otherwise the server will hang.
@@ -70,10 +74,7 @@ impl Connection {
                 },
                 Ok(n) => {
                     debug!("CONN : we read {} bytes", n);
-
-                    // we read something, so set our echo flag to true. this
-                    // means we will send this message back to our clients
-                    echo = true;
+                    bytes += n;
 
                     // if we read less than 1024 bytes, then we know the
                     // socket is empty and we should stop reading. if we
@@ -96,21 +97,46 @@ impl Connection {
             }
         }
 
-        if echo {
-            // TODO: handle EGAIN
-            debug!("echoing back");
-            self.sock.write_all(&buf).unwrap();
-        }
-
         // we are EPOLLET, so the event_loop will deregister our connection before handing off to
         // us. now that we are done, re-register so we can read more later.
-        // note: this reregister call is the return value of our readable function
-        event_loop.reregister(&self.sock, self.token, self.interest, PollOpt::edge() | PollOpt::oneshot())
+        try!(event_loop.reregister(&self.sock, self.token, self.interest, PollOpt::edge() | PollOpt::oneshot()));
+
+        let message = String::from_utf8_lossy(&buf[..bytes]).into_owned();
+        debug!("{:?}: tell SERVER to send back: {}", self.token, message);
+        Ok(message)
     }
 
     fn writable(&mut self, event_loop: &mut EventLoop<MyHandler>) -> io::Result<()> {
-        // TODO: implement this
-        Ok(())
+
+        self.send_queue.pop().and_then(|message| {
+            write!(self.sock, "message from token {:?}: {}", self.token, message).unwrap_or_else(|e| {
+                error!("Failed to send buffer for token {:?}, error: {}", self.token, e);
+            });
+            Some(())
+        });
+
+        if self.send_queue.len() == 0 {
+            self.interest.remove(Interest::writable());
+        }
+
+        event_loop.reregister(&self.sock, self.token, self.interest, PollOpt::edge() | PollOpt::oneshot())
+    }
+
+    // register the new connection with the event_loop. this will let our connection read
+    // next tick.
+    fn register(&mut self, event_loop: &mut EventLoop<MyHandler>) -> io::Result<()> {
+        self.interest.insert(Interest::readable());
+
+        event_loop.register_opt(
+            &self.sock,
+            self.token,
+            self.interest, 
+            PollOpt::edge() | PollOpt::oneshot()
+        )
+    }
+
+    fn shutdown(&mut self, event_loop: &mut EventLoop<MyHandler>) -> io::Result<()> {
+        event_loop.deregister(&self.sock)
     }
 }
 
@@ -136,18 +162,14 @@ impl Server {
         // the event loop. fancy...
         // i use Slab::insert_with() so I don't have to call Slab::insert(), get the token back and
         // _then_ associate it with the connection.
-        let token = self.conns.insert_with(|token| {
-            let conn = Connection::new(sock, token);
+        let _ = self.conns.insert_with(|token| {
+            debug!("registering {:?} with event loop", token);
+            let mut conn = Connection::new(sock, token);
+            conn.register(event_loop).ok().expect("could not register new socket with event loop");
             conn
         }).unwrap();
 
-        // register the new connection with the event_loop. this will let our connection read
-        // next tick.
-        // TODO: this is leaky. make our connection register itself.
-        event_loop.register_opt(&self.conns[token].sock, token, Interest::readable(), PollOpt::edge() | PollOpt::oneshot())
-            .ok().expect("could not register socket with event loop");
-
-        // yo, remember we are EPOLLET. this means even our SERVER needs to reregister.
+        // remember we are EPOLLET. this means even our SERVER token needs to reregister.
         event_loop.reregister(&self.sock, SERVER, Interest::readable(), PollOpt::edge() | PollOpt::oneshot())
             .ok().expect("could not reregister SERVER socket with event loop");
 
@@ -161,13 +183,28 @@ impl Server {
     // forward a readable event to the connection, identified by the token
     fn conn_readable(&mut self, event_loop: &mut EventLoop<MyHandler>, token: Token) -> io::Result<()> {
         debug!("server conn readable; token={:?}", token);
-        self.find_connection_by_token(token).readable(event_loop)
+        let message = self.find_connection_by_token(token).readable(event_loop).unwrap();
+
+        // notify all connections there is a new message to send
+        for conn in self.conns.iter_mut() {
+            conn.send_queue.push(message.clone());
+            conn.interest.insert(Interest::writable());
+            event_loop.register_opt(&conn.sock, conn.token, conn.interest, PollOpt::edge() | PollOpt::oneshot())
+                .ok().expect("could not register socket with event loop");
+        }
+
+        Ok(())
     }
 
     // forward a writable event to the connection, identified by the token
     fn conn_writable(&mut self, event_loop: &mut EventLoop<MyHandler>, token: Token) -> io::Result<()> {
         debug!("server conn writable; token={:?}", token);
         self.find_connection_by_token(token).writable(event_loop)
+    }
+
+    fn conn_shutdown(&mut self, event_loop: &mut EventLoop<MyHandler>, token: Token) -> io::Result<()> {
+        debug!("server conn shutdown; token={:?}", token);
+        self.find_connection_by_token(token).shutdown(event_loop)
     }
 
     fn find_connection_by_token<'a>(&'a mut self, token: Token) -> &'a mut Connection {
@@ -191,6 +228,13 @@ impl MyHandler {
             }
         }
     }
+
+    fn shutdown(&mut self, event_loop: &mut EventLoop<MyHandler>, token: Token) {
+        match token {
+            SERVER => event_loop.shutdown(),
+            _ => self.server.conn_shutdown(event_loop, token).unwrap()
+        };
+    }
 }
 
 impl Handler for MyHandler {
@@ -198,8 +242,11 @@ impl Handler for MyHandler {
     type Message = ();
 
     fn readable(&mut self, event_loop: &mut EventLoop<MyHandler>, token: Token, hint: ReadHint) {
-        // TODO: properly handle hup hint
         debug!("hint = {:?}", hint);
+
+        if hint.is_hup() {
+            self.shutdown(event_loop, token);
+        }
 
         match token {
             SERVER => self.server.accept(event_loop).unwrap(),

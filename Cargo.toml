@@ -13,3 +13,7 @@ git = "https://github.com/carllerche/mio"
 [[bin]]
 name = "mob-server"
 path = "src/main.rs"
+
+[[bin]]
+name = "mob-client"
+path = "src/client.rs"
