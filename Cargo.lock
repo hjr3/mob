@@ -22,8 +22,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "bytes"
-version = "0.2.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
+version = "0.2.10"
+source = "git+https://github.com/carllerche/bytes#d20661676fe7d31b11c2dadd5abcab3105e3d85f"
 
 [[package]]
 name = "clock_ticks"
@@ -66,21 +66,21 @@ dependencies = [
 [[package]]
 name = "mio"
 version = "0.4.0"
-source = "git+https://github.com/carllerche/mio#80daf1b66d10701517359f8c5588e97959dc569f"
+source = "git+https://github.com/carllerche/mio#96506f2f8373b1a1fdc802a2af3cd92251d2cd82"
 dependencies = [
- "bytes 0.2.9 (registry+https://github.com/rust-lang/crates.io-index)",
+ "bytes 0.2.10 (git+https://github.com/carllerche/bytes)",
  "clock_ticks 0.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc 0.1.8 (registry+https://github.com/rust-lang/crates.io-index)",
  "log 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "nix 0.3.8 (git+https://github.com/carllerche/nix-rust)",
+ "nix 0.3.9 (git+https://github.com/carllerche/nix-rust)",
  "slab 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "winapi 0.2.0-pre (git+https://github.com/retep998/winapi-rs)",
 ]
 
 [[package]]
 name = "nix"
-version = "0.3.8"
-source = "git+https://github.com/carllerche/nix-rust#a0fc60700f9e8b93e570e51460b10201f721b635"
+version = "0.3.9"
+source = "git+https://github.com/carllerche/nix-rust#d49aa0737f3ed7734c2f4964cf0683f643144a60"
 dependencies = [
  "bitflags 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc 0.1.8 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -109,5 +109,5 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [[package]]
 name = "winapi"
 version = "0.2.0-pre"
-source = "git+https://github.com/retep998/winapi-rs#bf86b2cc5b1225a122428d28157cb10a6ddedc8f"
+source = "git+https://github.com/retep998/winapi-rs#b3a7d6f828d1a4b48c7c41e9d7a15a70544d7974"
 

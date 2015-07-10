@@ -30,7 +30,7 @@ struct Connection {
     // _again_ during the next even loop tick. by that next tick, the kernel
     // should have drained some of the send buffer.
     // see: http://stackoverflow.com/a/13568962/775246
-    interest: Interest,
+    interest: EventSet,
 
     send_queue: Vec<String>,
 }
@@ -42,7 +42,7 @@ impl Connection {
             token: token,
 
             // new connections are hung up when they are first created
-            interest: Interest::hup(),
+            interest: EventSet::hup(),
 
             send_queue: Vec::new(),
         }
@@ -89,7 +89,7 @@ impl Connection {
 
                     // if we remove readable here the only interest left is hup, specified
                     // when we initially created the new connection.
-                    self.interest.remove(Interest::readable());
+                    self.interest.remove(EventSet::readable());
                     break;
                 }
             }
@@ -122,7 +122,7 @@ impl Connection {
         });
 
         if self.send_queue.len() == 0 {
-            self.interest.remove(Interest::writable());
+            self.interest.remove(EventSet::writable());
         }
 
         event_loop.reregister(
@@ -135,7 +135,7 @@ impl Connection {
 
     fn queue_message(&mut self, event_loop: &mut EventLoop<Server>, message: String) -> io::Result<()> {
         self.send_queue.push(message);
-        self.interest.insert(Interest::writable());
+        self.interest.insert(EventSet::writable());
 
         event_loop.register_opt(
             &self.sock,
@@ -148,7 +148,7 @@ impl Connection {
     // register the new connection with the event_loop. this will let our connection read
     // next tick.
     fn register(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<()> {
-        self.interest.insert(Interest::readable());
+        self.interest.insert(EventSet::readable());
 
         event_loop.register_opt(
             &self.sock,
@@ -192,7 +192,7 @@ impl Server {
         event_loop.register_opt(
             &self.sock,
             self.token,
-            Interest::readable(),
+            EventSet::readable(),
             PollOpt::edge() | PollOpt::oneshot()
         )
     }
@@ -221,7 +221,7 @@ impl Server {
         event_loop.reregister(
             &self.sock,
             self.token,
-            Interest::readable(),
+            EventSet::readable(),
             PollOpt::edge() | PollOpt::oneshot()
         )
     }
@@ -249,28 +249,13 @@ impl Server {
         &mut self.conns[token]
     }
 
-    fn shutdown(&mut self, event_loop: &mut EventLoop<Server>, token: Token) {
-        if self.token == token {
-            event_loop.shutdown();
-        } else {
-            debug!("server conn shutdown; token={:?}", token);
-            self.find_connection_by_token(token).shutdown(event_loop).unwrap();
-        }
-    }
-}
-
-impl Handler for Server {
-    type Timeout = ();
-    type Message = ();
-
-    fn readable(&mut self, event_loop: &mut EventLoop<Server>, token: Token, hint: ReadHint) {
-        debug!("hint = {:?}", hint);
+    fn readable(&mut self, event_loop: &mut EventLoop<Server>, token: Token) {
 
         // normally our hint is ReadHint, but due to the way kqueue works we need to handle HupHint
         // here too. see https://github.com/carllerche/mio/issues/184 for more information.
-        if hint.is_hup() {
-            self.shutdown(event_loop, token);
-        }
+        //if hint.is_hup() {
+        //    self.shutdown(event_loop, token);
+        //}
 
         if self.token == token {
             self.accept(event_loop).unwrap();
@@ -287,6 +272,41 @@ impl Handler for Server {
             panic!("received writable for token 0");
         } else {
             self.conn_writable(event_loop, token).unwrap()
+        }
+    }
+
+    fn shutdown(&mut self, event_loop: &mut EventLoop<Server>, token: Token) {
+        if self.token == token {
+            event_loop.shutdown();
+        } else {
+            debug!("server conn shutdown; token={:?}", token);
+            self.find_connection_by_token(token).shutdown(event_loop).unwrap();
+        }
+    }
+}
+
+impl Handler for Server {
+    type Timeout = ();
+    type Message = ();
+
+    fn ready(&mut self, event_loop: &mut EventLoop<Server>, token: Token, events: EventSet) {
+        debug!("events = {:?}", events);
+
+        if events.is_error() {
+            // TODO: should i do something other than shutdown here?
+            self.shutdown(event_loop, token);
+        }
+
+        if events.is_hup() {
+            self.shutdown(event_loop, token);
+        }
+
+        if events.is_readable() {
+            self.readable(event_loop, token);
+        }
+
+        if events.is_writable() {
+            self.writable(event_loop, token);
         }
     }
 }
