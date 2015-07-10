@@ -55,6 +55,7 @@ impl Connection {
     //
     // idea: pretty sure we should use a closure here instead, like thread::scoped
     fn readable(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<String> {
+
         // there are more advanced buffers we can create, but to reduce
         // cognitive load while we learn how this all works, use this
         // naive buffer
@@ -111,9 +112,6 @@ impl Connection {
 
     fn writable(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<()> {
 
-        // TODO: handle the case where our connection is shutdown but the event loop still hands us
-        // a writable event
-
         self.send_queue.pop().and_then(|message| {
             write!(self.sock, "message from token {:?}: {}", self.token, message).unwrap_or_else(|e| {
                 error!("Failed to send buffer for token {:?}, error: {}", self.token, e);
@@ -157,10 +155,6 @@ impl Connection {
             PollOpt::edge() | PollOpt::oneshot()
         )
     }
-
-    fn shutdown(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<()> {
-        event_loop.deregister(&self.sock)
-    }
 }
 
 struct Server {
@@ -180,11 +174,15 @@ impl Server {
         Server {
             sock: sock,
 
-            token: Token(0),
+            // I don't use Token(0) because kqueue will send stuff to Token(0)
+            // by default causing really strange behavior. This way, if I see
+            // something as Token(0), I know there are kqueue shenanigans
+            // going on.
+            token: Token(1),
 
             // SERVER is Token(0), so start after that
             // we can deal with a max of 128 connections
-            conns: Slab::new_starting_at(Token(1), 128)
+            conns: Slab::new_starting_at(Token(2), 128)
         }
     }
 
@@ -201,7 +199,18 @@ impl Server {
         debug!("server accepting new socket");
 
         // TODO: figure out what errors we should handle here
-        let sock = self.sock.accept().unwrap().unwrap();
+        let sock = match self.sock.accept() {
+            Ok(s) => {
+                match s {
+                    Some(sock) => sock,
+                    None => {
+                        error!("Failed to accept new socket");
+                        return Ok(());
+                    }
+                }
+            },
+            Err(e) => panic!("{}", e)
+        };
 
         // Slab::insert() returns the index where the connection was inserted. in mio, the Slab is
         // actually defined as `pub type Slab<T> = ::slab::Slab<T, ::Token>;`. now, Token is really
@@ -250,13 +259,6 @@ impl Server {
     }
 
     fn readable(&mut self, event_loop: &mut EventLoop<Server>, token: Token) {
-
-        // normally our hint is ReadHint, but due to the way kqueue works we need to handle HupHint
-        // here too. see https://github.com/carllerche/mio/issues/184 for more information.
-        //if hint.is_hup() {
-        //    self.shutdown(event_loop, token);
-        //}
-
         if self.token == token {
             self.accept(event_loop).unwrap();
         } else {
@@ -280,7 +282,7 @@ impl Server {
             event_loop.shutdown();
         } else {
             debug!("server conn shutdown; token={:?}", token);
-            self.find_connection_by_token(token).shutdown(event_loop).unwrap();
+            self.conns.remove(token);
         }
     }
 }
@@ -295,10 +297,12 @@ impl Handler for Server {
         if events.is_error() {
             // TODO: should i do something other than shutdown here?
             self.shutdown(event_loop, token);
+            return;
         }
 
         if events.is_hup() {
             self.shutdown(event_loop, token);
+            return;
         }
 
         if events.is_readable() {
