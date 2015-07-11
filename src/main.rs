@@ -4,12 +4,11 @@ extern crate mio;
 extern crate env_logger;
 
 use std::io;
-use std::io::Read;
-use std::io::Write;
 use std::net::SocketAddr;
 use std::str::FromStr;
 
 use mio::*;
+use mio::buf::ByteBuf;
 use mio::tcp::*;
 use mio::util::Slab;
 
@@ -23,16 +22,16 @@ struct Connection {
     // token used to register with the event loop
     token: Token,
 
-    // current state of the connection. we will usually be in a readable state.
-    // when we want to write, we can write as part of the readable action. only
-    // when we get EAGAIN do we need to switch to a writable state. EAGAIN
+    // types of events to listen to. we will usually be in a readable state.
+    // when we want to write, make sure we are handling EGAIN properly.
+    // when we get EAGAIN do we need to reregister to a writable state. EAGAIN
     // means the kernel's send buffer is full and we need to try to write
     // _again_ during the next even loop tick. by that next tick, the kernel
     // should have drained some of the send buffer.
     // see: http://stackoverflow.com/a/13568962/775246
     interest: EventSet,
 
-    send_queue: Vec<String>,
+    send_queue: Vec<ByteBuf>,
 }
 
 impl Connection {
@@ -41,7 +40,10 @@ impl Connection {
             sock: sock,
             token: token,
 
-            // new connections are hung up when they are first created
+            // new connections are only listening for a hang up event when
+            // they are first created. we always want to make sure we are 
+            // listening for the hang up event. we will additionally listen
+            // for readable and writable events later on.
             interest: EventSet::hup(),
 
             send_queue: Vec::new(),
@@ -54,42 +56,54 @@ impl Connection {
     // then the mio library could not mutate it further.
     //
     // idea: pretty sure we should use a closure here instead, like thread::scoped
-    fn readable(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<String> {
+    // doing more research into this, mio does not use a closure for perf. i need to find where i
+    // read that.
+    /// Handle read event from event loop.
+    ///
+    /// Currently only reads a max of 2048 bytes. Excess bytes are dropped on the floor.
+    ///
+    /// The recieve buffer is sent back to `Server` so the message can be broadcast to all
+    /// listening connections.
+    fn readable(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<ByteBuf> {
 
-        // there are more advanced buffers we can create, but to reduce
-        // cognitive load while we learn how this all works, use this
-        // naive buffer
-        let mut buf = [0u8; 1024];
-        let mut bytes = 0;
+        // ByteBuf is a heap allocated slice that mio supports internally. We use this as it does
+        // the work of tracking how much of our slice has been used. I chose a capacity of 2048
+        // after reading 
+        // https://github.com/carllerche/mio/blob/eed4855c627892b88f7ca68d3283cbc708a1c2b3/src/io.rs#L23-27
+        // as that seems like a good size of streaming. If you are wondering what the difference
+        // between messaged based and continuous streaming read
+        // http://stackoverflow.com/questions/3017633/difference-between-message-oriented-protocols-and-stream-oriented-protocols
+        // . TLDR: UDP vs TCP. We are using TCP.
+        let mut recv_buf = ByteBuf::mut_with_capacity(2048);
 
         // we are EPOLLET and EPOLLONESHOT, so we _must_ drain the entire
         // socket receive buffer, otherwise the server will hang.
         loop {
-            match self.sock.read(&mut buf) {
+            match self.sock.try_read_buf(&mut recv_buf) {
                 // the socket receive buffer is empty, so let's move on
-                Ok(0) => {
+                // try_read_buf internally handles EWOULDBLOCK here too
+                Ok(None) => {
                     debug!("CONN : we read 0 bytes");
                     break;
                 },
-                Ok(n) => {
+                Ok(Some(n)) => {
                     debug!("CONN : we read {} bytes", n);
-                    bytes += n;
 
-                    // if we read less than 1024 bytes, then we know the
+                    // if we read less than capacity, then we know the
                     // socket is empty and we should stop reading. if we
-                    // read a full 1024, we need to keep reading so we
-                    // can drain the socket. if the client sent exactly 1024,
-                    // we will match the arm above.
-                    // TODO: make 1024 a non-magic number
-                    if n < 1024 {
+                    // read to full capacity, we need to keep reading so we
+                    // can drain the socket. if the client sent exactly capacity,
+                    // we will match the arm above. the recieve buffer will be
+                    // full, so extra bytes are being dropped on the floor. to
+                    // properly handle this, i would need to push the data into
+                    // a growable Vec<u8>.
+                    if n < recv_buf.capacity() {
                         break;
                     }
                 },
                 Err(e) => {
-                    debug!("not implemented; client err={:?}", e);
+                    error!("Failed to read buffer for token {:?}, error: {}", self.token, e);
 
-                    // if we remove readable here the only interest left is hup, specified
-                    // when we initially created the new connection.
                     self.interest.remove(EventSet::readable());
                     break;
                 }
@@ -105,17 +119,30 @@ impl Connection {
                 PollOpt::edge() | PollOpt::oneshot()
         ));
 
-        let message = String::from_utf8_lossy(&buf[..bytes]).into_owned();
-        debug!("{:?}: tell SERVER to send back: {}", self.token, message);
-        Ok(message)
+        Ok(recv_buf.flip())
     }
 
+    /// Handle a writable event from the event loop.
+    ///
+    /// Send one message from the send queue to the client. If the queue is empty, remove interest
+    /// in write events.
+    /// TODO: Figure out if sending more than one message is optimal. Maybe we should be trying to
+    /// flush until the kernel sends back EAGAIN?
     fn writable(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<()> {
 
-        self.send_queue.pop().and_then(|message| {
-            write!(self.sock, "message from token {:?}: {}", self.token, message).unwrap_or_else(|e| {
-                error!("Failed to send buffer for token {:?}, error: {}", self.token, e);
-            });
+        self.send_queue.pop().and_then(|mut buf| {
+            match self.sock.try_write_buf(&mut buf) {
+                Ok(None) => {
+                    debug!("client flushing buf; EWOULDBLOCK");
+                },
+                Ok(Some(n)) => {
+                    debug!("CONN : we wrote {} bytes", n);
+                },
+                Err(e) => {
+                    error!("Failed to send buffer for token {:?}, error: {}", self.token, e);
+                }
+            };
+
             Some(())
         });
 
@@ -131,7 +158,12 @@ impl Connection {
         )
     }
 
-    fn queue_message(&mut self, event_loop: &mut EventLoop<Server>, message: String) -> io::Result<()> {
+    /// Queue an outgoing message to the client.
+    ///
+    /// This will cause the connection to register interests in write events with the event loop.
+    /// The connection can still safely have an interest in read events. The read and write buffers
+    /// operate independently of each other.
+    fn queue_message(&mut self, event_loop: &mut EventLoop<Server>, message: ByteBuf) -> io::Result<()> {
         self.send_queue.push(message);
         self.interest.insert(EventSet::writable());
 
@@ -143,8 +175,9 @@ impl Connection {
         )
     }
 
-    // register the new connection with the event_loop. this will let our connection read
-    // next tick.
+    /// Register interest in read events with the event_loop.
+    ///
+    /// This will let our connection accept reads starting next event loop tick.
     fn register(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<()> {
         self.interest.insert(EventSet::readable());
 
@@ -155,6 +188,10 @@ impl Connection {
             PollOpt::edge() | PollOpt::oneshot()
         )
     }
+
+    //fn shutdown(&mut self) {
+    //    self.sock.shutdown(Shutdown::Both).unwrap();
+    //}
 }
 
 struct Server {
@@ -195,6 +232,10 @@ impl Server {
         )
     }
 
+    /// Accept a _new_ client connection.
+    ///
+    /// The server will keep track of the new connection and forward any events from the event loop
+    /// to this connection.
     fn accept(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<()> {
         debug!("server accepting new socket");
 
@@ -235,29 +276,10 @@ impl Server {
         )
     }
 
-    // forward a readable event to the connection, identified by the token
-    fn conn_readable(&mut self, event_loop: &mut EventLoop<Server>, token: Token) -> io::Result<()> {
-        debug!("server conn readable; token={:?}", token);
-        let message = try!(self.find_connection_by_token(token).readable(event_loop));
-
-        // notify all connections there is a new message to send
-        for conn in self.conns.iter_mut() {
-            try!(conn.queue_message(event_loop, message.clone()));
-        }
-
-        Ok(())
-    }
-
-    // forward a writable event to the connection, identified by the token
-    fn conn_writable(&mut self, event_loop: &mut EventLoop<Server>, token: Token) -> io::Result<()> {
-        debug!("server conn writable; token={:?}", token);
-        self.find_connection_by_token(token).writable(event_loop)
-    }
-
-    fn find_connection_by_token<'a>(&'a mut self, token: Token) -> &'a mut Connection {
-        &mut self.conns[token]
-    }
-
+    /// Handle a read event from the event loop.
+    ///
+    /// A read event for our `Server` token means we are establishing a new connection. A read
+    /// event for any other token should be handed off to that connection.
     fn readable(&mut self, event_loop: &mut EventLoop<Server>, token: Token) {
         if self.token == token {
             self.accept(event_loop).unwrap();
@@ -269,11 +291,34 @@ impl Server {
         }
     }
 
+    /// Forward a readable event to an established connection.
+    ///
+    /// Connections are identified by the token provided to us from the event loop. Once a read has
+    /// finished, push the receive buffer into the all the existing connections so we can
+    /// broadcast.
+    fn conn_readable(&mut self, event_loop: &mut EventLoop<Server>, token: Token) -> io::Result<()> {
+        debug!("server conn readable; token={:?}", token);
+        let message = try!(self.find_connection_by_token(token).readable(event_loop));
+
+        // notify all connections there is a new message to send
+        for conn in self.conns.iter_mut() {
+            // TODO: use references so we don't have to clone
+            let conn_send_buf = ByteBuf::from_slice(message.bytes());
+            try!(conn.queue_message(event_loop, conn_send_buf));
+        }
+
+        Ok(())
+    }
+
+    /// Handle a write event from the event loop.
+    ///
+    /// We never expect a write event for our `Server` token . A write event for any other token
+    /// should be handed off to that connection.
     fn writable(&mut self, event_loop: &mut EventLoop<Server>, token: Token) {
         if self.token == token {
             panic!("received writable for token 0");
         } else {
-            self.conn_writable(event_loop, token).unwrap()
+            self.find_connection_by_token(token).writable(event_loop).unwrap();
         }
     }
 
@@ -282,8 +327,18 @@ impl Server {
             event_loop.shutdown();
         } else {
             debug!("server conn shutdown; token={:?}", token);
+
+            // TODO: client hup means the socket is already shutdown. Are
+            // there cases where the client is still up?
+            //self.find_connection_by_token(token).shutdown();
+
             self.conns.remove(token);
         }
+    }
+
+    /// Find a connection in the slab using the given token.
+    fn find_connection_by_token<'a>(&'a mut self, token: Token) -> &'a mut Connection {
+        &mut self.conns[token]
     }
 }
 

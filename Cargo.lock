@@ -23,7 +23,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [[package]]
 name = "bytes"
 version = "0.2.10"
-source = "git+https://github.com/carllerche/bytes#d20661676fe7d31b11c2dadd5abcab3105e3d85f"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "clock_ticks"
@@ -66,21 +66,21 @@ dependencies = [
 [[package]]
 name = "mio"
 version = "0.4.0"
-source = "git+https://github.com/carllerche/mio#96506f2f8373b1a1fdc802a2af3cd92251d2cd82"
+source = "git+https://github.com/carllerche/mio#eed4855c627892b88f7ca68d3283cbc708a1c2b3"
 dependencies = [
- "bytes 0.2.10 (git+https://github.com/carllerche/bytes)",
+ "bytes 0.2.10 (registry+https://github.com/rust-lang/crates.io-index)",
  "clock_ticks 0.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc 0.1.8 (registry+https://github.com/rust-lang/crates.io-index)",
  "log 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "nix 0.3.9 (git+https://github.com/carllerche/nix-rust)",
+ "nix 0.3.9 (registry+https://github.com/rust-lang/crates.io-index)",
  "slab 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "winapi 0.2.0-pre (git+https://github.com/retep998/winapi-rs)",
+ "winapi 0.1.23 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
 name = "nix"
 version = "0.3.9"
-source = "git+https://github.com/carllerche/nix-rust#d49aa0737f3ed7734c2f4964cf0683f643144a60"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 dependencies = [
  "bitflags 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc 0.1.8 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -108,6 +108,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "winapi"
-version = "0.2.0-pre"
-source = "git+https://github.com/retep998/winapi-rs#b3a7d6f828d1a4b48c7c41e9d7a15a70544d7974"
+version = "0.1.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+dependencies = [
+ "libc 0.1.8 (registry+https://github.com/rust-lang/crates.io-index)",
+]
 
