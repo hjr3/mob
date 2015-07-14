@@ -64,7 +64,7 @@ impl Connection {
     ///
     /// The recieve buffer is sent back to `Server` so the message can be broadcast to all
     /// listening connections.
-    fn readable(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<ByteBuf> {
+    fn readable(&mut self, event_loop: &mut EventLoop<Server>) -> ByteBuf {
 
         // ByteBuf is a heap allocated slice that mio supports internally. We use this as it does
         // the work of tracking how much of our slice has been used. I chose a capacity of 2048
@@ -112,14 +112,16 @@ impl Connection {
 
         // we are EPOLLET, so the event_loop will deregister our connection before handing off to
         // us. now that we are done, re-register so we can read more later.
-        try!(event_loop.reregister(
+        event_loop.reregister(
                 &self.sock,
                 self.token,
                 self.interest,
                 PollOpt::edge() | PollOpt::oneshot()
-        ));
+        ).unwrap_or_else(|e| {
+            error!("Failed to reregister {:?}, {:?}", self.token, e);
+        });
 
-        Ok(recv_buf.flip())
+        recv_buf.flip()
     }
 
     /// Handle a writable event from the event loop.
@@ -128,7 +130,7 @@ impl Connection {
     /// in write events.
     /// TODO: Figure out if sending more than one message is optimal. Maybe we should be trying to
     /// flush until the kernel sends back EAGAIN?
-    fn writable(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<()> {
+    fn writable(&mut self, event_loop: &mut EventLoop<Server>) {
 
         self.send_queue.pop().and_then(|mut buf| {
             match self.sock.try_write_buf(&mut buf) {
@@ -139,7 +141,7 @@ impl Connection {
                     debug!("CONN : we wrote {} bytes", n);
                 },
                 Err(e) => {
-                    error!("Failed to send buffer for token {:?}, error: {}", self.token, e);
+                    error!("Failed to send buffer for {:?}, error: {}", self.token, e);
                 }
             };
 
@@ -155,7 +157,9 @@ impl Connection {
             self.token,
             self.interest,
             PollOpt::edge() | PollOpt::oneshot()
-        )
+        ).unwrap_or_else(|e| {
+            error!("Failed to reregister {:?}, {:?}", self.token, e);
+        });
     }
 
     /// Queue an outgoing message to the client.
@@ -163,7 +167,7 @@ impl Connection {
     /// This will cause the connection to register interests in write events with the event loop.
     /// The connection can still safely have an interest in read events. The read and write buffers
     /// operate independently of each other.
-    fn queue_message(&mut self, event_loop: &mut EventLoop<Server>, message: ByteBuf) -> io::Result<()> {
+    fn queue_message(&mut self, event_loop: &mut EventLoop<Server>, message: ByteBuf) {
         self.send_queue.push(message);
         self.interest.insert(EventSet::writable());
 
@@ -172,7 +176,9 @@ impl Connection {
             self.token,
             self.interest,
             PollOpt::edge() | PollOpt::oneshot()
-        )
+        ).unwrap_or_else(|e| {
+            error!("Failed to reregister {:?}, {:?}", self.token, e);
+        });
     }
 
     /// Register interest in read events with the event_loop.
@@ -188,10 +194,6 @@ impl Connection {
             PollOpt::edge() | PollOpt::oneshot()
         )
     }
-
-    //fn shutdown(&mut self) {
-    //    self.sock.shutdown(Shutdown::Both).unwrap();
-    //}
 }
 
 struct Server {
@@ -217,12 +219,15 @@ impl Server {
             // going on.
             token: Token(1),
 
-            // SERVER is Token(0), so start after that
-            // we can deal with a max of 128 connections
+            // SERVER is Token(1), so start after that
+            // we can deal with a max of 126 connections
             conns: Slab::new_starting_at(Token(2), 128)
         }
     }
 
+    /// Register Server with the event loop.
+    ///
+    /// This keeps the registration details neatly tucked away inside of our implementation.
     fn register(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<()> {
         event_loop.register_opt(
             &self.sock,
@@ -236,44 +241,62 @@ impl Server {
     ///
     /// The server will keep track of the new connection and forward any events from the event loop
     /// to this connection.
-    fn accept(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<()> {
+    fn accept(&mut self, event_loop: &mut EventLoop<Server>) {
         debug!("server accepting new socket");
 
-        // TODO: figure out what errors we should handle here
+        // Log an error if there is no socket, but otherwise move on so we do not tear down the
+        // entire server.
         let sock = match self.sock.accept() {
             Ok(s) => {
                 match s {
                     Some(sock) => sock,
                     None => {
                         error!("Failed to accept new socket");
-                        return Ok(());
+                        return;
                     }
                 }
             },
-            Err(e) => panic!("{}", e)
+            Err(e) => {
+                error!("Failed to accept new socket, {:?}", e);
+                return;
+            }
         };
 
-        // Slab::insert() returns the index where the connection was inserted. in mio, the Slab is
-        // actually defined as `pub type Slab<T> = ::slab::Slab<T, ::Token>;`. now, Token is really
-        // just a type wrapper around `usize` and Token implemented `::slab::Index` trait. so,
-        // every insert into the connection slab will return the new token we need to register with
-        // the event loop. fancy...
-        // i use Slab::insert_with() so I don't have to call Slab::insert(), get the token back and
-        // _then_ associate it with the connection.
-        let _ = self.conns.insert_with(|token| {
+        // `Slab#insert_with` is a wrapper around `Slab#insert`. I like `#insert_with` because I
+        // make the `Token` required for creating a new connection.
+        //
+        // `Slab#insert` returns the index where the connection was inserted. Remember that in mio,
+        // the Slab is actually defined as `pub type Slab<T> = ::slab::Slab<T, ::Token>;`. Token is
+        // just a tuple struct around `usize` and Token implemented `::slab::Index` trait. So,
+        // every insert into the connection slab will return a new token needed to register with
+        // the event loop. Fancy...
+        let _: Option<Token> = self.conns.insert_with(|token| {
             debug!("registering {:?} with event loop", token);
-            let mut conn = Connection::new(sock, token);
-            conn.register(event_loop).ok().expect("could not register new socket with event loop");
-            conn
-        }).unwrap();
+            Connection::new(sock, token)
+        })
+        .or_else(|| {
+            // If we fail to insert, `conn` will go out of scope and be dropped.
+            error!("Failed to insert connection into slab");
+            None
+        })
+        .and_then(|token| {
+            let _: io::Result<()> = self.find_connection_by_token(token).register(event_loop).or_else(|e| {
+                error!("Failed to register {:?} connection with event loop, {:?}", token, e);
+                self.conns.remove(token);
+                Ok(())
+            });
+            Some(token)
+        });
 
-        // remember we are EPOLLET. this means even our SERVER token needs to reregister.
+        // We are using edge-triggered polling. Even our SERVER token needs to reregister.
         event_loop.reregister(
             &self.sock,
             self.token,
             EventSet::readable(),
             PollOpt::edge() | PollOpt::oneshot()
-        )
+        ).unwrap_or_else(|e| {
+            error!("Failed to reregister server, {:?}", e);
+        });
     }
 
     /// Handle a read event from the event loop.
@@ -282,12 +305,12 @@ impl Server {
     /// event for any other token should be handed off to that connection.
     fn readable(&mut self, event_loop: &mut EventLoop<Server>, token: Token) {
         if self.token == token {
-            self.accept(event_loop).unwrap();
+            self.accept(event_loop);
         } else {
 
-            // if our readable event handler received a token that is _not_ SERVER, then it must be
+            // If our readable event handler received a token that is _not_ SERVER, then it must be
             // one of the connections in the slab.
-            self.conn_readable(event_loop, token).unwrap()
+            self.conn_readable(event_loop, token);
         }
     }
 
@@ -296,18 +319,20 @@ impl Server {
     /// Connections are identified by the token provided to us from the event loop. Once a read has
     /// finished, push the receive buffer into the all the existing connections so we can
     /// broadcast.
-    fn conn_readable(&mut self, event_loop: &mut EventLoop<Server>, token: Token) -> io::Result<()> {
+    fn conn_readable(&mut self, event_loop: &mut EventLoop<Server>, token: Token) {
         debug!("server conn readable; token={:?}", token);
-        let message = try!(self.find_connection_by_token(token).readable(event_loop));
+        let message = self.find_connection_by_token(token).readable(event_loop);
 
-        // notify all connections there is a new message to send
+        if message.remaining() == message.capacity() { // is_empty
+            return;
+        }
+
+        // Queue up a write for all connected clients.
         for conn in self.conns.iter_mut() {
             // TODO: use references so we don't have to clone
             let conn_send_buf = ByteBuf::from_slice(message.bytes());
-            try!(conn.queue_message(event_loop, conn_send_buf));
+            conn.queue_message(event_loop, conn_send_buf);
         }
-
-        Ok(())
     }
 
     /// Handle a write event from the event loop.
@@ -316,9 +341,9 @@ impl Server {
     /// should be handed off to that connection.
     fn writable(&mut self, event_loop: &mut EventLoop<Server>, token: Token) {
         if self.token == token {
-            panic!("received writable for token 0");
+            panic!("Received writable event for {:?}.", self.token);
         } else {
-            self.find_connection_by_token(token).writable(event_loop).unwrap();
+            self.find_connection_by_token(token).writable(event_loop);
         }
     }
 
@@ -330,8 +355,6 @@ impl Server {
 
             // TODO: client hup means the socket is already shutdown. Are
             // there cases where the client is still up?
-            //self.find_connection_by_token(token).shutdown();
-
             self.conns.remove(token);
         }
     }
@@ -371,16 +394,17 @@ impl Handler for Server {
 }
 
 fn main() {
-    env_logger::init().unwrap();
+    env_logger::init().ok().expect("Failed to init logger");
 
-    let addr: SocketAddr = FromStr::from_str("127.0.0.1:8000").unwrap();
-    let sock = TcpListener::bind(&addr).unwrap();
+    let addr: SocketAddr = FromStr::from_str("127.0.0.1:8000")
+        .ok().expect("Failed to parse host:port string");
+    let sock = TcpListener::bind(&addr).ok().expect("Failed to bind address");
 
-    let mut event_loop = EventLoop::new().unwrap();
+    let mut event_loop = EventLoop::new().ok().expect("Failed to create event loop");
 
     let mut server = Server::new(sock);
-    server.register(&mut event_loop).unwrap();
+    server.register(&mut event_loop).ok().expect("Failed to register server with event loop");
 
     info!("Even loop starting...");
-    event_loop.run(&mut server).unwrap();
+    event_loop.run(&mut server).ok().expect("Failed to start event loop");
 }
