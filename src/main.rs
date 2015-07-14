@@ -237,6 +237,20 @@ impl Server {
         )
     }
 
+    /// Register Server with the event loop.
+    ///
+    /// This keeps the registration details neatly tucked away inside of our implementation.
+    fn reregister(&mut self, event_loop: &mut EventLoop<Server>) {
+        event_loop.reregister(
+            &self.sock,
+            self.token,
+            EventSet::readable(),
+            PollOpt::edge() | PollOpt::oneshot()
+        ).unwrap_or_else(|e| {
+            error!("Failed to reregister server {:?}, {:?}", self.token, e);
+        });
+    }
+
     /// Accept a _new_ client connection.
     ///
     /// The server will keep track of the new connection and forward any events from the event loop
@@ -252,12 +266,14 @@ impl Server {
                     Some(sock) => sock,
                     None => {
                         error!("Failed to accept new socket");
+                        self.reregister(event_loop);
                         return;
                     }
                 }
             },
             Err(e) => {
                 error!("Failed to accept new socket, {:?}", e);
+                self.reregister(event_loop);
                 return;
             }
         };
@@ -289,14 +305,7 @@ impl Server {
         });
 
         // We are using edge-triggered polling. Even our SERVER token needs to reregister.
-        event_loop.reregister(
-            &self.sock,
-            self.token,
-            EventSet::readable(),
-            PollOpt::edge() | PollOpt::oneshot()
-        ).unwrap_or_else(|e| {
-            error!("Failed to reregister server, {:?}", e);
-        });
+        self.reregister(event_loop);
     }
 
     /// Handle a read event from the event loop.
