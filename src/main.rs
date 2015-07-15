@@ -357,14 +357,20 @@ impl Server {
             return;
         }
 
+        // TODO pipeine this whole thing
+        let mut bad_tokens = Vec::new();
+
         // Queue up a write for all connected clients.
         for conn in self.conns.iter_mut() {
             // TODO: use references so we don't have to clone
             let conn_send_buf = ByteBuf::from_slice(message.bytes());
             conn.queue_message(event_loop, conn_send_buf).unwrap_or_else(|_| {
-                // TODO fix this
-                //self.shutdown(event_loop, token);
+                bad_tokens.push(conn.token);
             });
+        }
+
+        for t in bad_tokens {
+            self.shutdown(event_loop, t);
         }
     }
 
