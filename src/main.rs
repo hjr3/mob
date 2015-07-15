@@ -64,7 +64,7 @@ impl Connection {
     ///
     /// The recieve buffer is sent back to `Server` so the message can be broadcast to all
     /// listening connections.
-    fn readable(&mut self, event_loop: &mut EventLoop<Server>) -> ByteBuf {
+    fn readable(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<ByteBuf> {
 
         // ByteBuf is a heap allocated slice that mio supports internally. We use this as it does
         // the work of tracking how much of our slice has been used. I chose a capacity of 2048
@@ -112,16 +112,21 @@ impl Connection {
 
         // we are EPOLLET, so the event_loop will deregister our connection before handing off to
         // us. now that we are done, re-register so we can read more later.
-        event_loop.reregister(
+        let res = event_loop.reregister(
                 &self.sock,
                 self.token,
                 self.interest,
                 PollOpt::edge() | PollOpt::oneshot()
-        ).unwrap_or_else(|e| {
+        ).or_else(|e| {
             error!("Failed to reregister {:?}, {:?}", self.token, e);
+            Err(e)
         });
 
-        recv_buf.flip()
+        if res.is_err() {
+            return Err(res.unwrap_err());
+        }
+
+        Ok(recv_buf.flip())
     }
 
     /// Handle a writable event from the event loop.
@@ -130,7 +135,7 @@ impl Connection {
     /// in write events.
     /// TODO: Figure out if sending more than one message is optimal. Maybe we should be trying to
     /// flush until the kernel sends back EAGAIN?
-    fn writable(&mut self, event_loop: &mut EventLoop<Server>) {
+    fn writable(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<()> {
 
         self.send_queue.pop().and_then(|mut buf| {
             match self.sock.try_write_buf(&mut buf) {
@@ -157,9 +162,10 @@ impl Connection {
             self.token,
             self.interest,
             PollOpt::edge() | PollOpt::oneshot()
-        ).unwrap_or_else(|e| {
+        ).or_else(|e| {
             error!("Failed to reregister {:?}, {:?}", self.token, e);
-        });
+            Err(e)
+        })
     }
 
     /// Queue an outgoing message to the client.
@@ -167,7 +173,7 @@ impl Connection {
     /// This will cause the connection to register interests in write events with the event loop.
     /// The connection can still safely have an interest in read events. The read and write buffers
     /// operate independently of each other.
-    fn queue_message(&mut self, event_loop: &mut EventLoop<Server>, message: ByteBuf) {
+    fn queue_message(&mut self, event_loop: &mut EventLoop<Server>, message: ByteBuf) -> io::Result<()> {
         self.send_queue.push(message);
         self.interest.insert(EventSet::writable());
 
@@ -176,9 +182,10 @@ impl Connection {
             self.token,
             self.interest,
             PollOpt::edge() | PollOpt::oneshot()
-        ).unwrap_or_else(|e| {
+        ).or_else(|e| {
             error!("Failed to reregister {:?}, {:?}", self.token, e);
-        });
+            Err(e)
+        })
     }
 
     /// Register interest in read events with the event_loop.
@@ -192,7 +199,10 @@ impl Connection {
             self.token,
             self.interest, 
             PollOpt::edge() | PollOpt::oneshot()
-        )
+        ).or_else(|e| {
+            error!("Failed to reregister {:?}, {:?}", self.token, e);
+            Err(e)
+        })
     }
 }
 
@@ -234,7 +244,10 @@ impl Server {
             self.token,
             EventSet::readable(),
             PollOpt::edge() | PollOpt::oneshot()
-        )
+        ).or_else(|e| {
+            error!("Failed to register server {:?}, {:?}", self.token, e);
+            Err(e)
+        })
     }
 
     /// Register Server with the event loop.
@@ -248,7 +261,9 @@ impl Server {
             PollOpt::edge() | PollOpt::oneshot()
         ).unwrap_or_else(|e| {
             error!("Failed to reregister server {:?}, {:?}", self.token, e);
-        });
+            let server_token = self.token;
+            self.shutdown(event_loop, server_token);
+        })
     }
 
     /// Accept a _new_ client connection.
@@ -330,7 +345,13 @@ impl Server {
     /// broadcast.
     fn conn_readable(&mut self, event_loop: &mut EventLoop<Server>, token: Token) {
         debug!("server conn readable; token={:?}", token);
-        let message = self.find_connection_by_token(token).readable(event_loop);
+        let res = self.find_connection_by_token(token).readable(event_loop);
+
+        if res.is_err() {
+            self.shutdown(event_loop, token);
+        }
+
+        let message = res.unwrap();
 
         if message.remaining() == message.capacity() { // is_empty
             return;
@@ -340,7 +361,10 @@ impl Server {
         for conn in self.conns.iter_mut() {
             // TODO: use references so we don't have to clone
             let conn_send_buf = ByteBuf::from_slice(message.bytes());
-            conn.queue_message(event_loop, conn_send_buf);
+            conn.queue_message(event_loop, conn_send_buf).unwrap_or_else(|_| {
+                // TODO fix this
+                //self.shutdown(event_loop, token);
+            });
         }
     }
 
@@ -352,7 +376,9 @@ impl Server {
         if self.token == token {
             panic!("Received writable event for {:?}.", self.token);
         } else {
-            self.find_connection_by_token(token).writable(event_loop);
+            self.find_connection_by_token(token)
+                .writable(event_loop)
+                .unwrap_or_else(|_| self.shutdown(event_loop, token));
         }
     }
 
