@@ -349,6 +349,7 @@ impl Server {
 
         if res.is_err() {
             self.shutdown(event_loop, token);
+            return;
         }
 
         let message = res.unwrap();
