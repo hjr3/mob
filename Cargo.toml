@@ -4,11 +4,9 @@ version = "0.1.0"
 authors = ["Herman J. Radtke III <hermanradtke@gmail.com>"]
 
 [dependencies]
-log = "0.3.1"
 env_logger = "0.3.1"
-
-[dependencies.mio]
-git = "https://github.com/carllerche/mio"
+log = "0.3.1"
+mio = "0.4"
 
 [[bin]]
 name = "mob-server"
