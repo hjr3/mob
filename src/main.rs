@@ -1,5 +1,5 @@
+extern crate byteorder;
 extern crate mio;
-extern crate bytes;
 
 #[macro_use] extern crate log;
 extern crate env_logger;
@@ -36,5 +36,7 @@ fn main() {
     server.register(&mut event_loop).ok().expect("Failed to register server with event loop");
 
     info!("Even loop starting...");
-    event_loop.run(&mut server).ok().expect("Failed to start event loop");
+    event_loop.run(&mut server).unwrap_or_else(|e| {
+        error!("Event loop failed {:?}", e);
+    });
 }

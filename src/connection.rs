@@ -1,9 +1,11 @@
 use std::io;
-use std::io::{Error, ErrorKind};
+use std::io::prelude::*;
+use std::io::{Cursor, Error, ErrorKind};
+
+use byteorder::{ByteOrder, BigEndian};
 
 use mio::*;
 use mio::tcp::*;
-use bytes::ByteBuf;
 
 use server::Server;
 
@@ -12,7 +14,7 @@ use server::Server;
 /// _accepted_ by the SERVER connection.
 pub struct Connection {
     // handle to the accepted socket
-    pub sock: TcpStream,
+    sock: TcpStream,
 
     // token used to register with the event loop
     pub token: Token,
@@ -21,9 +23,18 @@ pub struct Connection {
     interest: EventSet,
 
     // messages waiting to be sent out
-    send_queue: Vec<ByteBuf>,
+    send_queue: Vec<Vec<u8>>,
 
+    // track whether a connection is reset
     is_reset: bool,
+
+    // track whether a read received `WouldBlock` and store the number of
+    // byte we are supposed to read
+    read_continuation: Option<u64>,
+
+    // track whether a write received `WouldBlock`
+    write_continuation: bool,
+
 }
 
 impl Connection {
@@ -31,71 +42,90 @@ impl Connection {
         Connection {
             sock: sock,
             token: token,
-
-            // new connections are only listening for a hang up event when
-            // they are first created. we always want to make sure we are
-            // listening for the hang up event. we will additionally listen
-            // for readable and writable events later on.
             interest: EventSet::hup(),
-
             send_queue: Vec::new(),
-
             is_reset: false,
+            read_continuation: None,
+            write_continuation: false,
         }
     }
 
     /// Handle read event from event loop.
     ///
-    /// Currently only reads a max of 2048 bytes. Excess bytes are dropped on the floor.
+    /// The Handler must continue calling until None is returned.
     ///
     /// The recieve buffer is sent back to `Server` so the message can be broadcast to all
     /// listening connections.
-    pub fn readable(&mut self) -> io::Result<ByteBuf> {
+    pub fn readable(&mut self) -> io::Result<Option<Vec<u8>>> {
 
-        // ByteBuf is a heap allocated slice that mio supports internally. We use this as it does
-        // the work of tracking how much of our slice has been used. I chose a capacity of 2048
-        // after reading
-        // https://github.com/carllerche/mio/blob/eed4855c627892b88f7ca68d3283cbc708a1c2b3/src/io.rs#L23-27
-        // as that seems like a good size of streaming. If you are wondering what the difference
-        // between messaged based and continuous streaming read
-        // http://stackoverflow.com/questions/3017633/difference-between-message-oriented-protocols-and-stream-oriented-protocols
-        // . TLDR: UDP vs TCP. We are using TCP.
-        let mut recv_buf = ByteBuf::mut_with_capacity(2048);
+        let msg_len = match try!(self.read_message_length()) {
+            None => { return Ok(None); },
+            Some(n) => n,
+        };
 
-        // we are PollOpt::edge() and PollOpt::oneshot(), so we _must_ drain
-        // the entire socket receive buffer, otherwise the server will hang.
-        loop {
-            match self.sock.try_read_buf(&mut recv_buf) {
-                // the socket receive buffer is empty, so let's move on
-                // try_read_buf internally handles WouldBlock here too
-                Ok(None) => {
-                    debug!("CONN : we read 0 bytes");
-                    break;
-                },
-                Ok(Some(n)) => {
-                    debug!("CONN : we read {} bytes", n);
-
-                    // if we read less than capacity, then we know the
-                    // socket is empty and we should stop reading. if we
-                    // read to full capacity, we need to keep reading so we
-                    // can drain the socket. if the client sent exactly capacity,
-                    // we will match the arm above. the recieve buffer will be
-                    // full, so extra bytes are being dropped on the floor. to
-                    // properly handle this, i would need to push the data into
-                    // a growable Vec<u8>.
-                    if n < recv_buf.capacity() {
-                        break;
-                    }
-                },
-                Err(e) => {
-                    error!("Failed to read buffer for token {:?}, error: {}", self.token, e);
-                    return Err(e);
-                }
-            }
+        if msg_len == 0 {
+            debug!("message is zero bytes; token={:?}", self.token);
+            return Ok(None);
         }
 
-        // change our type from MutByteBuf to ByteBuf
-        Ok(recv_buf.flip())
+        debug!("Expected message length: {}", msg_len);
+        let mut recv_buf : Vec<u8> = Vec::with_capacity(msg_len as usize);
+
+        // UFCS: resolve "multiple applicable items in scope [E0034]" error
+        let sock_ref = <TcpStream as Read>::by_ref(&mut self.sock);
+
+        match sock_ref.take(msg_len as u64).try_read_buf(&mut recv_buf) {
+            Ok(None) => {
+                debug!("CONN : read encountered WouldBlock");
+
+                // We are being forced to try again, but we already read the two bytes off of the
+                // wire that determined the length. We need to store the message length so we can
+                // resume next time we get readable.
+                self.read_continuation = Some(msg_len as u64);
+                Ok(None)
+            },
+            Ok(Some(n)) => {
+                debug!("CONN : we read {} bytes", n);
+
+                if n < msg_len as usize {
+                    return Err(Error::new(ErrorKind::InvalidData, "Did not read enough bytes"));
+                }
+
+                self.read_continuation = None;
+
+                Ok(Some(recv_buf))
+            },
+            Err(e) => {
+                error!("Failed to read buffer for token {:?}, error: {}", self.token, e);
+                Err(e)
+            }
+        }
+    }
+
+    fn read_message_length(&mut self) -> io::Result<Option<u64>> {
+        if let Some(n) = self.read_continuation {
+            return Ok(Some(n));
+        }
+
+        let mut buf = [0u8; 8];
+
+        let bytes = match self.sock.try_read(&mut buf) {
+            Ok(None) => {
+                return Ok(None);
+            },
+            Ok(Some(n)) => n,
+            Err(e) => {
+                return Err(e);
+            }
+        };
+
+        if bytes < 8 {
+            warn!("Found message length of {} bytes", bytes);
+            return Err(Error::new(ErrorKind::InvalidData, "Invalid message length"));
+        }
+
+        let msg_len = BigEndian::read_u64(buf.as_ref());
+        Ok(Some(msg_len))
     }
 
     /// Handle a writable event from the event loop.
@@ -108,17 +138,35 @@ impl Connection {
 
         try!(self.send_queue.pop()
             .ok_or(Error::new(ErrorKind::Other, "Could not pop send queue"))
-            .and_then(|mut buf| {
-                match self.sock.try_write_buf(&mut buf) {
+            .and_then(|buf| {
+                match self.write_message_length(&buf) {
+                    Ok(None) => {
+                        // put message back into the queue so we can try again
+                        self.send_queue.push(buf);
+                        return Ok(());
+                    },
+                    Ok(Some(())) => {
+                        ()
+                    },
+                    Err(e) => {
+                        error!("Failed to send buffer for {:?}, error: {}", self.token, e);
+                        return Err(e);
+                    }
+                }
+
+                let mut send_buf = Cursor::new(buf);
+                match self.sock.try_write_buf(&mut send_buf) {
                     Ok(None) => {
                         debug!("client flushing buf; WouldBlock");
 
                         // put message back into the queue so we can try again
-                        self.send_queue.push(buf);
+                        self.send_queue.push(send_buf.into_inner());
+                        self.write_continuation = true;
                         Ok(())
                     },
                     Ok(Some(n)) => {
                         debug!("CONN : we wrote {} bytes", n);
+                        self.write_continuation = false;
                         Ok(())
                     },
                     Err(e) => {
@@ -136,16 +184,46 @@ impl Connection {
         Ok(())
     }
 
+    fn write_message_length(&mut self, buf: &Vec<u8>) -> io::Result<Option<()>> {
+        if self.write_continuation {
+            return Ok(Some(()));
+        }
+
+        let len = buf.len();
+        let mut send_buf = [0u8; 8];
+        BigEndian::write_u64(&mut send_buf, len as u64);
+
+        match self.sock.try_write(&mut send_buf) {
+            Ok(None) => {
+                debug!("client flushing buf; WouldBlock");
+
+                Ok(None)
+            },
+            Ok(Some(n)) => {
+                debug!("Sent message length of {} bytes", n);
+                Ok(Some(()))
+            },
+            Err(e) => {
+                error!("Failed to send buffer for {:?}, error: {}", self.token, e);
+                Err(e)
+            }
+        }
+    }
+
     /// Queue an outgoing message to the client.
     ///
     /// This will cause the connection to register interests in write events with the event loop.
     /// The connection can still safely have an interest in read events. The read and write buffers
     /// operate independently of each other.
-    pub fn send_message(&mut self, message: ByteBuf) -> io::Result<()> {
+    pub fn send_message(&mut self, message: Vec<u8>) -> io::Result<()> {
         trace!("connection send_message; token={:?}", self.token);
 
         self.send_queue.push(message);
-        self.interest.insert(EventSet::writable());
+
+        if !self.interest.is_writable() {
+            self.interest.insert(EventSet::writable());
+        }
+
         Ok(())
     }
 
@@ -157,7 +235,7 @@ impl Connection {
 
         self.interest.insert(EventSet::readable());
 
-        event_loop.register_opt(
+        event_loop.register(
             &self.sock,
             self.token,
             self.interest,
