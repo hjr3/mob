@@ -1,3 +1,4 @@
+extern crate byteorder;
 extern crate mio;
 extern crate bytes;
 

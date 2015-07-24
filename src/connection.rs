@@ -1,5 +1,8 @@
 use std::io;
+use std::io::prelude::*;
 use std::io::{Error, ErrorKind};
+
+use byteorder::{ByteOrder, BigEndian};
 
 use mio::*;
 use mio::tcp::*;
@@ -12,7 +15,7 @@ use server::Server;
 /// _accepted_ by the SERVER connection.
 pub struct Connection {
     // handle to the accepted socket
-    pub sock: TcpStream,
+    sock: TcpStream,
 
     // token used to register with the event loop
     pub token: Token,
@@ -23,7 +26,11 @@ pub struct Connection {
     // messages waiting to be sent out
     send_queue: Vec<ByteBuf>,
 
+
     is_reset: bool,
+
+    read_continuation: Option<u64>,
+
 }
 
 impl Connection {
@@ -31,71 +38,88 @@ impl Connection {
         Connection {
             sock: sock,
             token: token,
-
-            // new connections are only listening for a hang up event when
-            // they are first created. we always want to make sure we are
-            // listening for the hang up event. we will additionally listen
-            // for readable and writable events later on.
             interest: EventSet::hup(),
-
             send_queue: Vec::new(),
-
             is_reset: false,
+            read_continuation: None,
         }
     }
 
     /// Handle read event from event loop.
     ///
-    /// Currently only reads a max of 2048 bytes. Excess bytes are dropped on the floor.
+    /// The Handler must continue calling until no more ByteBuf is returned.
     ///
     /// The recieve buffer is sent back to `Server` so the message can be broadcast to all
     /// listening connections.
-    pub fn readable(&mut self) -> io::Result<ByteBuf> {
+    pub fn readable(&mut self) -> io::Result<Option<ByteBuf>> {
 
-        // ByteBuf is a heap allocated slice that mio supports internally. We use this as it does
-        // the work of tracking how much of our slice has been used. I chose a capacity of 2048
-        // after reading
-        // https://github.com/carllerche/mio/blob/eed4855c627892b88f7ca68d3283cbc708a1c2b3/src/io.rs#L23-27
-        // as that seems like a good size of streaming. If you are wondering what the difference
-        // between messaged based and continuous streaming read
-        // http://stackoverflow.com/questions/3017633/difference-between-message-oriented-protocols-and-stream-oriented-protocols
-        // . TLDR: UDP vs TCP. We are using TCP.
-        let mut recv_buf = ByteBuf::mut_with_capacity(2048);
-
-        // we are PollOpt::edge() and PollOpt::oneshot(), so we _must_ drain
-        // the entire socket receive buffer, otherwise the server will hang.
-        loop {
-            match self.sock.try_read_buf(&mut recv_buf) {
-                // the socket receive buffer is empty, so let's move on
-                // try_read_buf internally handles WouldBlock here too
-                Ok(None) => {
-                    debug!("CONN : we read 0 bytes");
-                    break;
-                },
-                Ok(Some(n)) => {
-                    debug!("CONN : we read {} bytes", n);
-
-                    // if we read less than capacity, then we know the
-                    // socket is empty and we should stop reading. if we
-                    // read to full capacity, we need to keep reading so we
-                    // can drain the socket. if the client sent exactly capacity,
-                    // we will match the arm above. the recieve buffer will be
-                    // full, so extra bytes are being dropped on the floor. to
-                    // properly handle this, i would need to push the data into
-                    // a growable Vec<u8>.
-                    if n < recv_buf.capacity() {
-                        break;
-                    }
-                },
-                Err(e) => {
-                    error!("Failed to read buffer for token {:?}, error: {}", self.token, e);
-                    return Err(e);
+        let msg_len = match self.message_length() {
+            Ok(n) => n as usize,
+            Err(e) => {
+                if let ErrorKind::WouldBlock = e.kind() {
+                    return Ok(None);
                 }
+
+                return Err(e);
             }
+        };
+
+        if msg_len == 0 {
+            debug!("message is zero bytes; token={:?}", self.token);
+            return Ok(None);
         }
 
-        // change our type from MutByteBuf to ByteBuf
-        Ok(recv_buf.flip())
+        debug!("Expected message length: {}", msg_len);
+        let mut recv_buf = ByteBuf::mut_with_capacity(msg_len);
+
+        // resolve "multiple applicable items in scope [E0034]" error
+        let sock_ref = <TcpStream as Read>::by_ref(&mut self.sock);
+
+        match sock_ref.take(msg_len as u64).try_read_buf(&mut recv_buf) {
+            Ok(None) => {
+                debug!("CONN : read encountered WouldBlock");
+
+                // We are being forced to try again, but we already read the two bytes off of the
+                // wire that determined the length. We need to store the message length so we can
+                // resume next time we get readable.
+                self.read_continuation = Some(msg_len as u64);
+                Ok(None)
+            },
+            Ok(Some(n)) => {
+                debug!("CONN : we read {} bytes", n);
+
+                if n < msg_len {
+                    return Err(Error::new(ErrorKind::InvalidData, "Did not read enough bytes"));
+                }
+
+                self.read_continuation = None;
+
+                Ok(Some(recv_buf.flip()))
+            },
+            Err(e) => {
+                error!("Failed to read buffer for token {:?}, error: {}", self.token, e);
+                Err(e)
+            }
+        }
+    }
+
+    fn message_length(&mut self) -> io::Result<u64> {
+        if let Some(n) = self.read_continuation {
+            return Ok(n);
+        }
+
+        let mut buf = [0u8; 8];
+
+        // need to handle would block here too
+        let byte_length = try!(self.sock.read(&mut buf));
+
+        if byte_length < 8 {
+            warn!("Found message length of {} bytes", byte_length);
+            return Err(Error::new(ErrorKind::InvalidData, "Invalid message length"));
+        }
+
+        let msg_len = BigEndian::read_u64(buf.as_ref());
+        Ok(msg_len)
     }
 
     /// Handle a writable event from the event loop.

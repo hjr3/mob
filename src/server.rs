@@ -19,7 +19,6 @@ pub struct Server {
 
     // flag that connections must be reset at the end of the event loop tick
     reset_tokens: Vec<Token>,
-
 }
 
 impl Handler for Server {
@@ -60,6 +59,8 @@ impl Handler for Server {
         if events.is_writable() {
             trace!("Write event for {:?}", token);
             assert!(self.token != token, "Received writable event for Server");
+
+            let _ = self.find_connection_by_token(token);
 
             if self.find_connection_by_token(token).is_reset() {
                 info!("{:?} has already been reset", token);
@@ -175,14 +176,6 @@ impl Server {
             }
         };
 
-        // `Slab#insert_with` is a wrapper around `Slab#insert`. I like `#insert_with` because I
-        // make the `Token` required for creating a new connection.
-        //
-        // `Slab#insert` returns the index where the connection was inserted. Remember that in mio,
-        // the Slab is actually defined as `pub type Slab<T> = ::slab::Slab<T, ::Token>;`. Token is
-        // just a tuple struct around `usize` and Token implemented `::slab::Index` trait. So,
-        // every insert into the connection slab will return a new token needed to register with
-        // the event loop. Fancy...
         match self.conns.insert_with(|token| {
             debug!("registering {:?} with event loop", token);
             Connection::new(sock, token)
@@ -203,7 +196,6 @@ impl Server {
             }
         };
 
-        // We are using edge-triggered polling. Even our SERVER token needs to reregister.
         self.reregister(event_loop);
     }
 
@@ -214,38 +206,37 @@ impl Server {
     /// broadcast.
     fn readable(&mut self, event_loop: &mut EventLoop<Server>, token: Token) -> io::Result<()> {
         debug!("server conn readable; token={:?}", token);
-        let message = try!(self.find_connection_by_token(token).readable());
 
-        let message = message.resume();
+        while let Some(message) = try!(self.find_connection_by_token(token).readable()) {
 
-        if message.bytes().len() == 0 {
-            return Ok(());
-        }
+            let message = message.resume();
 
-        // TODO pipeine this whole thing
-        let mut bad_tokens = Vec::new();
+            // TODO pipeine this whole thing
+            let mut bad_tokens = Vec::new();
 
-        // Queue up a write for all connected clients.
-        for conn in self.conns.iter_mut() {
-            // TODO: use references so we don't have to clone
-            let conn_send_buf = ByteBuf::from_slice(message.bytes());
-            conn.send_message(conn_send_buf)
-                .and_then(|_| conn.reregister(event_loop))
-                .unwrap_or_else(|e| {
-                    error!("Failed to queue message for {:?}: {:?}", conn.token, e);
-                    // We have a mutable borrow for the connection, so we cannot remove until the
-                    // loop is finished
-                    bad_tokens.push(conn.token)
-                });
-        }
+            // Queue up a write for all connected clients.
+            for conn in self.conns.iter_mut() {
+                // TODO: use references so we don't have to clone
+                let conn_send_buf = ByteBuf::from_slice(message.bytes());
+                conn.send_message(conn_send_buf)
+                    .and_then(|_| conn.reregister(event_loop))
+                    .unwrap_or_else(|e| {
+                        error!("Failed to queue message for {:?}: {:?}", conn.token, e);
+                        // We have a mutable borrow for the connection, so we cannot remove until the
+                        // loop is finished
+                        bad_tokens.push(conn.token)
+                    });
+            }
 
-        for t in bad_tokens {
-            self.reset_connection(event_loop, t);
+            for t in bad_tokens {
+                self.reset_connection(event_loop, t);
+            }
         }
 
         Ok(())
     }
 
+    /// Remove a connection from the slab
     fn reset_connection(&mut self, event_loop: &mut EventLoop<Server>, token: Token) {
         if self.token == token {
             event_loop.shutdown();

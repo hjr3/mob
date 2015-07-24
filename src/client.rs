@@ -1,8 +1,12 @@
+extern crate byteorder;
+
 use std::io::prelude::*;
 use std::net::TcpStream;
 use std::thread;
 
-static NTHREADS: i32 = 10;
+use byteorder::{ByteOrder, BigEndian};
+
+static NTHREADS: i32 = 2;
 
 fn main() {
 
@@ -13,7 +17,13 @@ fn main() {
             let mut stream = TcpStream::connect("127.0.0.1:8000").unwrap();
 
             loop {
-                write!(stream, "the answer is {}", i).unwrap();
+                let msg = format!("the answer is {}", i);
+                let mut buf = [0u8; 8];
+
+                println!("Sending over message length of {}", msg.len());
+                BigEndian::write_u64(&mut buf, msg.len() as u64);
+                stream.write_all(buf.as_ref()).unwrap();
+                stream.write_all(msg.as_ref()).unwrap();
 
                 let mut r = [0u8; 256];
                 match stream.read(&mut r) {
