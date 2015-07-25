@@ -92,6 +92,7 @@ impl Handler for Server {
                     .and_then(|_| self.find_connection_by_token(token).reregister(event_loop))
                     .unwrap_or_else(|e| {
                         warn!("Read event failed for {:?}: {:?}", token, e);
+                        let _ = self.find_connection_by_token(token).deregister(event_loop);
                         self.reset_connection(event_loop, token);
                     });
             }

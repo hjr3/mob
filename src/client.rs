@@ -6,7 +6,7 @@ use std::thread;
 
 use byteorder::{ByteOrder, BigEndian};
 
-static NTHREADS: i32 = 2;
+static NTHREADS: i32 = 10;
 
 fn main() {
 
@@ -20,13 +20,21 @@ fn main() {
                 let msg = format!("the answer is {}", i);
                 let mut buf = [0u8; 8];
 
-                println!("Sending over message length of {}", msg.len());
+                println!("thread {}: Sending over message length of {}", i, msg.len());
                 BigEndian::write_u64(&mut buf, msg.len() as u64);
                 stream.write_all(buf.as_ref()).unwrap();
                 stream.write_all(msg.as_ref()).unwrap();
 
+                let mut buf = [0u8; 8];
+                stream.read(&mut buf).unwrap();
+
+                let msg_len = BigEndian::read_u64(&mut buf);
+                println!("thread {}: Reading message length of {}", i, msg_len);
+
                 let mut r = [0u8; 256];
-                match stream.read(&mut r) {
+                let s_ref = <TcpStream as Read>::by_ref(&mut stream);
+
+                match s_ref.take(msg_len).read(&mut r) {
                     Ok(0) => {
                         println!("thread {}: 0 bytes read", i);
                     },

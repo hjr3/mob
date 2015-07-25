@@ -53,15 +53,9 @@ impl Connection {
     /// listening connections.
     pub fn readable(&mut self) -> io::Result<Option<ByteBuf>> {
 
-        let msg_len = match self.message_length() {
-            Ok(n) => n as usize,
-            Err(e) => {
-                if let ErrorKind::WouldBlock = e.kind() {
-                    return Ok(None);
-                }
-
-                return Err(e);
-            }
+        let msg_len = match try!(self.read_message_length()) {
+            None => { return Ok(None); },
+            Some(n) => n,
         };
 
         if msg_len == 0 {
@@ -70,7 +64,7 @@ impl Connection {
         }
 
         debug!("Expected message length: {}", msg_len);
-        let mut recv_buf = ByteBuf::mut_with_capacity(msg_len);
+        let mut recv_buf = ByteBuf::mut_with_capacity(msg_len as usize);
 
         // resolve "multiple applicable items in scope [E0034]" error
         let sock_ref = <TcpStream as Read>::by_ref(&mut self.sock);
@@ -88,7 +82,7 @@ impl Connection {
             Ok(Some(n)) => {
                 debug!("CONN : we read {} bytes", n);
 
-                if n < msg_len {
+                if n < msg_len as usize {
                     return Err(Error::new(ErrorKind::InvalidData, "Did not read enough bytes"));
                 }
 
@@ -103,23 +97,33 @@ impl Connection {
         }
     }
 
-    fn message_length(&mut self) -> io::Result<u64> {
+    fn read_message_length(&mut self) -> io::Result<Option<u64>> {
         if let Some(n) = self.read_continuation {
-            return Ok(n);
+            return Ok(Some(n));
         }
 
         let mut buf = [0u8; 8];
 
-        // need to handle would block here too
-        let byte_length = try!(self.sock.read(&mut buf));
+        let bytes = match self.sock.read(&mut buf) {
+            Ok(n) => n,
+            Err(e) => {
+                use std::io::ErrorKind::WouldBlock;
 
-        if byte_length < 8 {
-            warn!("Found message length of {} bytes", byte_length);
+                if let WouldBlock = e.kind() {
+                    return Ok(None);
+                }
+
+                return Err(e);
+            }
+        };
+
+        if bytes < 8 {
+            warn!("Found message length of {} bytes", bytes);
             return Err(Error::new(ErrorKind::InvalidData, "Invalid message length"));
         }
 
         let msg_len = BigEndian::read_u64(buf.as_ref());
-        Ok(msg_len)
+        Ok(Some(msg_len))
     }
 
     /// Handle a writable event from the event loop.
@@ -133,6 +137,21 @@ impl Connection {
         try!(self.send_queue.pop()
             .ok_or(Error::new(ErrorKind::Other, "Could not pop send queue"))
             .and_then(|mut buf| {
+                match self.write_message_length(&buf) {
+                    Ok(None) => {
+                        // put message back into the queue so we can try again
+                        self.send_queue.push(buf);
+                        return Ok(());
+                    },
+                    Ok(Some(())) => {
+                        ()
+                    },
+                    Err(e) => {
+                        error!("Failed to send buffer for {:?}, error: {}", self.token, e);
+                        return Err(e);
+                    }
+                }
+
                 match self.sock.try_write_buf(&mut buf) {
                     Ok(None) => {
                         debug!("client flushing buf; WouldBlock");
@@ -158,6 +177,31 @@ impl Connection {
         }
 
         Ok(())
+    }
+
+    fn write_message_length(&mut self, buf: &ByteBuf) -> io::Result<Option<()>> {
+
+        let len = buf.bytes().len();
+        let mut raw_buf = [0u8; 8];
+        BigEndian::write_u64(&mut raw_buf, len as u64);
+
+        let mut buf = ByteBuf::from_slice(raw_buf.as_ref());
+
+        match self.sock.try_write_buf(&mut buf) {
+            Ok(None) => {
+                debug!("client flushing buf; WouldBlock");
+
+                Ok(None)
+            },
+            Ok(Some(n)) => {
+                debug!("Sent message length of {} bytes", n);
+                Ok(Some(()))
+            },
+            Err(e) => {
+                error!("Failed to send buffer for {:?}, error: {}", self.token, e);
+                Err(e)
+            }
+        }
     }
 
     /// Queue an outgoing message to the client.
@@ -226,5 +270,13 @@ impl Connection {
 
     pub fn is_reset(&self) -> bool {
         self.is_reset
+    }
+
+    pub fn deregister(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<()> {
+        debug!("Deregistering {:?}", self.token);
+        event_loop.deregister(&self.sock).or_else(|e| {
+            error!("Failed to deregister {:?}, {:?}", self.token, e);
+            Err(e)
+        })
     }
 }
