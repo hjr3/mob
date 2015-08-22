@@ -2,8 +2,8 @@ use std::io;
 use std::io::{Error, ErrorKind};
 
 use mio::*;
-use mio::buf::ByteBuf;
 use mio::tcp::*;
+use bytes::ByteBuf;
 
 use server::Server;
 
@@ -22,6 +22,8 @@ pub struct Connection {
 
     // messages waiting to be sent out
     send_queue: Vec<ByteBuf>,
+
+    is_reset: bool,
 }
 
 impl Connection {
@@ -31,12 +33,14 @@ impl Connection {
             token: token,
 
             // new connections are only listening for a hang up event when
-            // they are first created. we always want to make sure we are 
+            // they are first created. we always want to make sure we are
             // listening for the hang up event. we will additionally listen
             // for readable and writable events later on.
             interest: EventSet::hup(),
 
             send_queue: Vec::new(),
+
+            is_reset: false,
         }
     }
 
@@ -50,7 +54,7 @@ impl Connection {
 
         // ByteBuf is a heap allocated slice that mio supports internally. We use this as it does
         // the work of tracking how much of our slice has been used. I chose a capacity of 2048
-        // after reading 
+        // after reading
         // https://github.com/carllerche/mio/blob/eed4855c627892b88f7ca68d3283cbc708a1c2b3/src/io.rs#L23-27
         // as that seems like a good size of streaming. If you are wondering what the difference
         // between messaged based and continuous streaming read
@@ -152,7 +156,7 @@ impl Connection {
         event_loop.register_opt(
             &self.sock,
             self.token,
-            self.interest, 
+            self.interest,
             PollOpt::edge() | PollOpt::oneshot()
         ).or_else(|e| {
             error!("Failed to reregister {:?}, {:?}", self.token, e);
@@ -171,5 +175,13 @@ impl Connection {
             error!("Failed to reregister {:?}, {:?}", self.token, e);
             Err(e)
         })
+    }
+
+    pub fn mark_reset(&mut self) {
+        self.is_reset = true;
+    }
+
+    pub fn is_reset(&self) -> bool {
+        self.is_reset
     }
 }
