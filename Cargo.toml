@@ -6,7 +6,14 @@ authors = ["Herman J. Radtke III <hermanradtke@gmail.com>"]
 [dependencies]
 env_logger = "0.3.1"
 log = "0.3.1"
-mio = "0.4"
+
+[dependencies.mio]
+git = "https://github.com/carllerche/mio"
+rev = "a579803"
+
+[dependencies.bytes]
+git = "https://github.com/carllerche/bytes"
+rev = "7edb577d0a"
 
 [[bin]]
 name = "mob-server"

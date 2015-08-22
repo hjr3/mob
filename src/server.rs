@@ -1,7 +1,7 @@
 use std::io;
 
 use mio::*;
-use mio::buf::ByteBuf;
+use bytes::ByteBuf;
 use mio::tcp::*;
 use mio::util::Slab;
 
@@ -13,15 +13,31 @@ pub struct Server {
 
     // token of our server. we keep track of it here instead of doing `const SERVER = Token(0)`.
     token: Token,
-    
+
     // a list of connections _accepted_ by our server
     conns: Slab<Connection>,
+
+    // flag that connections must be reset at the end of the event loop tick
+    reset_tokens: Vec<Token>,
 
 }
 
 impl Handler for Server {
     type Timeout = ();
     type Message = ();
+
+    fn tick(&mut self, _event_loop: &mut EventLoop<Server>) {
+        trace!("Handling end of tick");
+
+        for token in &self.reset_tokens {
+            if self.conns.contains(*token) {
+                debug!("reset connection; token={:?}", token);
+                self.conns.remove(*token);
+            }
+        }
+
+        self.reset_tokens.clear();
+    }
 
     fn ready(&mut self, event_loop: &mut EventLoop<Server>, token: Token, events: EventSet) {
         debug!("events = {:?}", events);
@@ -45,6 +61,11 @@ impl Handler for Server {
             trace!("Write event for {:?}", token);
             assert!(self.token != token, "Received writable event for Server");
 
+            if self.find_connection_by_token(token).is_reset() {
+                info!("{:?} has already been reset", token);
+                return;
+            }
+
             self.find_connection_by_token(token).writable()
                 .and_then(|_| self.find_connection_by_token(token).reregister(event_loop))
                 .unwrap_or_else(|e| {
@@ -60,6 +81,11 @@ impl Handler for Server {
             if self.token == token {
                 self.accept(event_loop);
             } else {
+
+                if self.find_connection_by_token(token).is_reset() {
+                    info!("{:?} has already been reset", token);
+                    return;
+                }
 
                 self.readable(event_loop, token)
                     .and_then(|_| self.find_connection_by_token(token).reregister(event_loop))
@@ -85,7 +111,9 @@ impl Server {
 
             // SERVER is Token(1), so start after that
             // we can deal with a max of 126 connections
-            conns: Slab::new_starting_at(Token(2), 128)
+            conns: Slab::new_starting_at(Token(2), 128),
+
+            reset_tokens: Vec::new(),
         }
     }
 
@@ -188,7 +216,9 @@ impl Server {
         debug!("server conn readable; token={:?}", token);
         let message = try!(self.find_connection_by_token(token).readable());
 
-        if message.remaining() == message.capacity() { // is_empty
+        let message = message.flip();
+
+        if message.bytes().len() == 0 {
             return Ok(());
         }
 
@@ -220,8 +250,9 @@ impl Server {
         if self.token == token {
             event_loop.shutdown();
         } else {
-            debug!("reset connection; token={:?}", token);
-            self.conns.remove(token);
+            debug!("pending reset connection; token={:?}", token);
+            self.find_connection_by_token(token).mark_reset();
+            self.reset_tokens.push(token);
         }
     }
 
