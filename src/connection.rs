@@ -142,6 +142,8 @@ impl Connection {
     /// The connection can still safely have an interest in read events. The read and write buffers
     /// operate independently of each other.
     pub fn send_message(&mut self, message: ByteBuf) -> io::Result<()> {
+        trace!("connection send_message; token={:?}", self.token);
+
         self.send_queue.push(message);
         self.interest.insert(EventSet::writable());
         Ok(())
@@ -151,6 +153,8 @@ impl Connection {
     ///
     /// This will let our connection accept reads starting next event loop tick.
     pub fn register(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<()> {
+        trace!("connection register; token={:?}", self.token);
+
         self.interest.insert(EventSet::readable());
 
         event_loop.register_opt(
@@ -166,6 +170,8 @@ impl Connection {
 
     /// Re-register interest in read events with the event_loop.
     pub fn reregister(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<()> {
+        trace!("connection reregister; token={:?}", self.token);
+
         event_loop.reregister(
             &self.sock,
             self.token,
@@ -177,7 +183,20 @@ impl Connection {
         })
     }
 
+    //pub fn deregister(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<()> {
+    //    trace!("connection deregister; token={:?}", self.token);
+
+    //    event_loop.deregister(
+    //        &self.sock
+    //    ).or_else(|e| {
+    //        error!("Failed to deregister {:?}, {:?}", self.token, e);
+    //        Err(e)
+    //    })
+    //}
+
     pub fn mark_reset(&mut self) {
+        trace!("connection mark_reset; token={:?}", self.token);
+
         self.is_reset = true;
     }
 

@@ -15,3 +15,9 @@ The client is just a very simple way to send a bunch of messages to the server.
 ### Logging
 
 I use the `env_logger` create. Logging can be turned on for mob-server with `RUST_LOG=mob_server ./target/debug/mob-server`. If you want to see the log output from mio as well, you can do `RUST_LOG=mob_server,mio ./target/debug/mob-server`.
+
+## Docker
+
+```
+docker run --rm -it -v $(pwd):/source schickling/rust cargo run --bin mob-server
+```

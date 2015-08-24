@@ -41,7 +41,7 @@ impl Handler for Server {
 
     fn ready(&mut self, event_loop: &mut EventLoop<Server>, token: Token, events: EventSet) {
         debug!("events = {:?}", events);
-        assert!(token != Token(0), "[BUG]: Received event for Token(0)");
+        assert!(token != Token(0), "[BUG]: Received event for Server token {:?}", token);
 
         if events.is_error() {
             warn!("Error event for {:?}", token);
@@ -216,7 +216,7 @@ impl Server {
         debug!("server conn readable; token={:?}", token);
         let message = try!(self.find_connection_by_token(token).readable());
 
-        let message = message.flip();
+        let message = message.resume();
 
         if message.bytes().len() == 0 {
             return Ok(());
