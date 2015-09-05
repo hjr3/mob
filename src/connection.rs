@@ -1,12 +1,11 @@
 use std::io;
 use std::io::prelude::*;
-use std::io::{Error, ErrorKind};
+use std::io::{Cursor, Error, ErrorKind};
 
 use byteorder::{ByteOrder, BigEndian};
 
 use mio::*;
 use mio::tcp::*;
-use bytes::ByteBuf;
 
 use server::Server;
 
@@ -24,7 +23,7 @@ pub struct Connection {
     interest: EventSet,
 
     // messages waiting to be sent out
-    send_queue: Vec<ByteBuf>,
+    send_queue: Vec<Vec<u8>>,
 
     is_reset: bool,
 
@@ -50,7 +49,7 @@ impl Connection {
     ///
     /// The recieve buffer is sent back to `Server` so the message can be broadcast to all
     /// listening connections.
-    pub fn readable(&mut self) -> io::Result<Option<ByteBuf>> {
+    pub fn readable(&mut self) -> io::Result<Option<Vec<u8>>> {
 
         let msg_len = match try!(self.read_message_length()) {
             None => { return Ok(None); },
@@ -63,7 +62,7 @@ impl Connection {
         }
 
         debug!("Expected message length: {}", msg_len);
-        let mut recv_buf = ByteBuf::mut_with_capacity(msg_len as usize);
+        let mut recv_buf : Vec<u8> = Vec::with_capacity(msg_len as usize);
 
         // resolve "multiple applicable items in scope [E0034]" error
         let sock_ref = <TcpStream as Read>::by_ref(&mut self.sock);
@@ -87,7 +86,7 @@ impl Connection {
 
                 self.read_continuation = None;
 
-                Ok(Some(recv_buf.flip()))
+                Ok(Some(recv_buf))
             },
             Err(e) => {
                 error!("Failed to read buffer for token {:?}, error: {}", self.token, e);
@@ -135,7 +134,7 @@ impl Connection {
 
         try!(self.send_queue.pop()
             .ok_or(Error::new(ErrorKind::Other, "Could not pop send queue"))
-            .and_then(|mut buf| {
+            .and_then(|buf| {
                 match self.write_message_length(&buf) {
                     Ok(None) => {
                         // put message back into the queue so we can try again
@@ -151,12 +150,13 @@ impl Connection {
                     }
                 }
 
-                match self.sock.try_write_buf(&mut buf) {
+                let mut send_buf = Cursor::new(buf);
+                match self.sock.try_write_buf(&mut send_buf) {
                     Ok(None) => {
                         debug!("client flushing buf; WouldBlock");
 
                         // put message back into the queue so we can try again
-                        self.send_queue.push(buf);
+                        self.send_queue.push(send_buf.into_inner());
                         Ok(())
                     },
                     Ok(Some(n)) => {
@@ -178,15 +178,15 @@ impl Connection {
         Ok(())
     }
 
-    fn write_message_length(&mut self, buf: &ByteBuf) -> io::Result<Option<()>> {
+    fn write_message_length(&mut self, buf: &Vec<u8>) -> io::Result<Option<()>> {
 
-        let len = buf.bytes().len();
+        let len = buf.len();
         let mut raw_buf = [0u8; 8];
         BigEndian::write_u64(&mut raw_buf, len as u64);
 
-        let mut buf = ByteBuf::from_slice(raw_buf.as_ref());
+        let mut send_buf = Cursor::new(raw_buf.to_vec());
 
-        match self.sock.try_write_buf(&mut buf) {
+        match self.sock.try_write_buf(&mut send_buf) {
             Ok(None) => {
                 debug!("client flushing buf; WouldBlock");
 
@@ -208,7 +208,7 @@ impl Connection {
     /// This will cause the connection to register interests in write events with the event loop.
     /// The connection can still safely have an interest in read events. The read and write buffers
     /// operate independently of each other.
-    pub fn send_message(&mut self, message: ByteBuf) -> io::Result<()> {
+    pub fn send_message(&mut self, message: Vec<u8>) -> io::Result<()> {
         trace!("connection send_message; token={:?}", self.token);
 
         self.send_queue.push(message);

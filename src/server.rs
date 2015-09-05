@@ -1,7 +1,6 @@
 use std::io;
 
 use mio::*;
-use bytes::ByteBuf;
 use mio::tcp::*;
 use mio::util::Slab;
 
@@ -217,15 +216,13 @@ impl Server {
 
         while let Some(message) = try!(self.find_connection_by_token(token).readable()) {
 
-            let message = message.resume();
-
             // TODO pipeine this whole thing
             let mut bad_tokens = Vec::new();
 
             // Queue up a write for all connected clients.
             for conn in self.conns.iter_mut() {
                 // TODO: use references so we don't have to clone
-                let conn_send_buf = ByteBuf::from_slice(message.bytes());
+                let conn_send_buf = message.clone();
                 conn.send_message(conn_send_buf)
                     .unwrap_or_else(|e| {
                         error!("Failed to queue message for {:?}: {:?}", conn.token, e);

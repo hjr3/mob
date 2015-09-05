@@ -8,7 +8,6 @@ byteorder = "0.3"
 env_logger = "0.3.1"
 log = "0.3.1"
 mio = "0.4.3"
-bytes = "0.2.11"
 
 [[bin]]
 name = "mob-server"
