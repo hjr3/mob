@@ -25,21 +25,33 @@ impl Handler for Server {
     type Timeout = ();
     type Message = ();
 
-    fn tick(&mut self, _event_loop: &mut EventLoop<Server>) {
+    fn tick(&mut self, event_loop: &mut EventLoop<Server>) {
         trace!("Handling end of tick");
 
         for token in &self.reset_tokens {
-            if self.conns.contains(*token) {
-                debug!("reset connection; token={:?}", token);
-                self.conns.remove(*token);
+            match self.conns.remove(*token) {
+                Some(_c) => {
+                    debug!("reset connection; token={:?}", token);
+                }
+                None => {
+                    warn!("Unable to remove connection for {:?}", token);
+                }
             }
         }
 
         self.reset_tokens.clear();
+
+        for c in self.conns.iter_mut() {
+            c.reregister(event_loop)
+                .unwrap_or_else(|e| {
+                    warn!("Reregister failed {:?}", e);
+                    c.mark_reset();
+                });
+        }
     }
 
     fn ready(&mut self, event_loop: &mut EventLoop<Server>, token: Token, events: EventSet) {
-        debug!("events = {:?}", events);
+        debug!("{:?} events = {:?}", token, events);
         assert!(token != Token(0), "[BUG]: Received event for Server token {:?}", token);
 
         if events.is_error() {
@@ -60,15 +72,12 @@ impl Handler for Server {
             trace!("Write event for {:?}", token);
             assert!(self.token != token, "Received writable event for Server");
 
-            let _ = self.find_connection_by_token(token);
-
             if self.find_connection_by_token(token).is_reset() {
                 info!("{:?} has already been reset", token);
                 return;
             }
 
             self.find_connection_by_token(token).writable()
-                .and_then(|_| self.find_connection_by_token(token).reregister(event_loop))
                 .unwrap_or_else(|e| {
                     warn!("Write event failed for {:?}, {:?}", token, e);
                     self.reset_connection(event_loop, token);
@@ -89,10 +98,8 @@ impl Handler for Server {
                 }
 
                 self.readable(event_loop, token)
-                    .and_then(|_| self.find_connection_by_token(token).reregister(event_loop))
                     .unwrap_or_else(|e| {
                         warn!("Read event failed for {:?}: {:?}", token, e);
-                        let _ = self.find_connection_by_token(token).deregister(event_loop);
                         self.reset_connection(event_loop, token);
                     });
             }
@@ -220,7 +227,6 @@ impl Server {
                 // TODO: use references so we don't have to clone
                 let conn_send_buf = ByteBuf::from_slice(message.bytes());
                 conn.send_message(conn_send_buf)
-                    .and_then(|_| conn.reregister(event_loop))
                     .unwrap_or_else(|e| {
                         error!("Failed to queue message for {:?}: {:?}", conn.token, e);
                         // We have a mutable borrow for the connection, so we cannot remove until the

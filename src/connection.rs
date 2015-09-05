@@ -26,7 +26,6 @@ pub struct Connection {
     // messages waiting to be sent out
     send_queue: Vec<ByteBuf>,
 
-
     is_reset: bool,
 
     read_continuation: Option<u64>,
@@ -213,7 +212,11 @@ impl Connection {
         trace!("connection send_message; token={:?}", self.token);
 
         self.send_queue.push(message);
-        self.interest.insert(EventSet::writable());
+
+        if !self.interest.is_writable() {
+            self.interest.insert(EventSet::writable());
+        }
+
         Ok(())
     }
 
@@ -270,13 +273,5 @@ impl Connection {
 
     pub fn is_reset(&self) -> bool {
         self.is_reset
-    }
-
-    pub fn deregister(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<()> {
-        debug!("Deregistering {:?}", self.token);
-        event_loop.deregister(&self.sock).or_else(|e| {
-            error!("Failed to deregister {:?}, {:?}", self.token, e);
-            Err(e)
-        })
     }
 }
