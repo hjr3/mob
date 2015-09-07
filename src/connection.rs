@@ -102,15 +102,12 @@ impl Connection {
 
         let mut buf = [0u8; 8];
 
-        let bytes = match self.sock.read(&mut buf) {
-            Ok(n) => n,
+        let bytes = match self.sock.try_read(&mut buf) {
+            Ok(None) => {
+                return Ok(None);
+            },
+            Ok(Some(n)) => n,
             Err(e) => {
-                use std::io::ErrorKind::WouldBlock;
-
-                if let WouldBlock = e.kind() {
-                    return Ok(None);
-                }
-
                 return Err(e);
             }
         };
@@ -181,12 +178,10 @@ impl Connection {
     fn write_message_length(&mut self, buf: &Vec<u8>) -> io::Result<Option<()>> {
 
         let len = buf.len();
-        let mut raw_buf = [0u8; 8];
-        BigEndian::write_u64(&mut raw_buf, len as u64);
+        let mut send_buf = [0u8; 8];
+        BigEndian::write_u64(&mut send_buf, len as u64);
 
-        let mut send_buf = Cursor::new(raw_buf.to_vec());
-
-        match self.sock.try_write_buf(&mut send_buf) {
+        match self.sock.try_write(&mut send_buf) {
             Ok(None) => {
                 debug!("client flushing buf; WouldBlock");
 
