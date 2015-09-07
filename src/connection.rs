@@ -25,9 +25,14 @@ pub struct Connection {
     // messages waiting to be sent out
     send_queue: Vec<Vec<u8>>,
 
+    // track whether a connection is reset
     is_reset: bool,
 
+    // track whether a read received `WouldBlock`
     read_continuation: Option<u64>,
+
+    // track whether a write received `WouldBlock`
+    write_continuation: bool,
 
 }
 
@@ -40,6 +45,7 @@ impl Connection {
             send_queue: Vec::new(),
             is_reset: false,
             read_continuation: None,
+            write_continuation: false,
         }
     }
 
@@ -154,10 +160,12 @@ impl Connection {
 
                         // put message back into the queue so we can try again
                         self.send_queue.push(send_buf.into_inner());
+                        self.write_continuation = true;
                         Ok(())
                     },
                     Ok(Some(n)) => {
                         debug!("CONN : we wrote {} bytes", n);
+                        self.write_continuation = false;
                         Ok(())
                     },
                     Err(e) => {
@@ -176,6 +184,9 @@ impl Connection {
     }
 
     fn write_message_length(&mut self, buf: &Vec<u8>) -> io::Result<Option<()>> {
+        if self.write_continuation {
+            return Ok(Some(()));
+        }
 
         let len = buf.len();
         let mut send_buf = [0u8; 8];
