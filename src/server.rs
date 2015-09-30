@@ -134,7 +134,7 @@ impl Server {
             &self.sock,
             self.token,
             EventSet::readable(),
-            PollOpt::edge() | PollOpt::oneshot()
+            PollOpt::edge()
         ).or_else(|e| {
             error!("Failed to register server {:?}, {:?}", self.token, e);
             Err(e)
@@ -144,17 +144,17 @@ impl Server {
     /// Reregister Server with the event loop.
     ///
     /// This keeps the registration details neatly tucked away inside of our implementation.
-    fn reregister(&mut self, event_loop: &mut EventLoop<Server>) {
-        event_loop.reregister(
-            &self.sock,
-            self.token,
-            EventSet::readable(),
-            PollOpt::edge() | PollOpt::oneshot()
-        ).unwrap_or_else(|e| {
-            error!("Failed to reregister server {:?}, {:?}", self.token, e);
-            event_loop.shutdown();
-        })
-    }
+    // fn reregister(&mut self, event_loop: &mut EventLoop<Server>) {
+    //     event_loop.reregister(
+    //         &self.sock,
+    //         self.token,
+    //         EventSet::readable(),
+    //         PollOpt::edge()
+    //     ).unwrap_or_else(|e| {
+    //         error!("Failed to reregister server {:?}, {:?}", self.token, e);
+    //         event_loop.shutdown();
+    //     })
+    // }
 
     /// Accept a _new_ client connection.
     ///
@@ -163,45 +163,45 @@ impl Server {
     fn accept(&mut self, event_loop: &mut EventLoop<Server>) {
         debug!("server accepting new socket");
 
-        self.reregister(event_loop);
-
-        // Log an error if there is no socket, but otherwise move on so we do not tear down the
-        // entire server.
-        let (sock, _) = match self.sock.accept() {
-            Ok(s) => {
-                match s {
-                    Some(sock) => sock,
-                    None => {
-                        error!("Failed to accept new socket");
-                        return;
+        loop {
+            // Log an error if there is no socket, but otherwise move on so we do not tear down the
+            // entire server.
+            let sock = match self.sock.accept() {
+                Ok(s) => {
+                    match s {
+                        Some((sock, _)) => sock,
+                        None => {
+                            debug!("accept encountered WouldBlock");
+                            return;
+                        }
                     }
+                },
+                Err(e) => {
+                    error!("Failed to accept new socket, {:?}", e);
+                    return;
                 }
-            },
-            Err(e) => {
-                error!("Failed to accept new socket, {:?}", e);
-                return;
-            }
-        };
+            };
 
-        match self.conns.insert_with(|token| {
-            debug!("registering {:?} with event loop", token);
-            Connection::new(sock, token)
-        }) {
-            Some(token) => {
-                // If we successfully insert, then register our connection.
-                match self.find_connection_by_token(token).register(event_loop) {
-                    Ok(_) => {},
-                    Err(e) => {
-                        error!("Failed to register {:?} connection with event loop, {:?}", token, e);
-                        self.conns.remove(token);
+            match self.conns.insert_with(|token| {
+                debug!("registering {:?} with event loop", token);
+                Connection::new(sock, token)
+            }) {
+                Some(token) => {
+                    // If we successfully insert, then register our connection.
+                    match self.find_connection_by_token(token).register(event_loop) {
+                        Ok(_) => {},
+                        Err(e) => {
+                            error!("Failed to register {:?} connection with event loop, {:?}", token, e);
+                            self.conns.remove(token);
+                        }
                     }
+                },
+                None => {
+                    // If we fail to insert, `conn` will go out of scope and be dropped.
+                    error!("Failed to insert connection into slab");
                 }
-            },
-            None => {
-                // If we fail to insert, `conn` will go out of scope and be dropped.
-                error!("Failed to insert connection into slab");
-            }
-        };
+            };
+        }
     }
 
     /// Forward a readable event to an established connection.
