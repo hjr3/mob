@@ -1,6 +1,7 @@
 use std::io;
 use std::io::prelude::*;
-use std::io::{Cursor, Error, ErrorKind};
+use std::io::{Error, ErrorKind};
+use std::rc::Rc;
 
 use byteorder::{ByteOrder, BigEndian};
 
@@ -23,7 +24,7 @@ pub struct Connection {
     interest: EventSet,
 
     // messages waiting to be sent out
-    send_queue: Vec<Vec<u8>>,
+    send_queue: Vec<Rc<Vec<u8>>>,
 
     // track whether a connection is reset
     is_reset: bool,
@@ -154,13 +155,12 @@ impl Connection {
                     }
                 }
 
-                let mut send_buf = Cursor::new(buf);
-                match self.sock.try_write_buf(&mut send_buf) {
+                match self.sock.try_write(&*buf) {
                     Ok(None) => {
                         debug!("client flushing buf; WouldBlock");
 
                         // put message back into the queue so we can try again
-                        self.send_queue.push(send_buf.into_inner());
+                        self.send_queue.push(buf);
                         self.write_continuation = true;
                         Ok(())
                     },
@@ -184,7 +184,7 @@ impl Connection {
         Ok(())
     }
 
-    fn write_message_length(&mut self, buf: &Vec<u8>) -> io::Result<Option<()>> {
+    fn write_message_length(&mut self, buf: &Rc<Vec<u8>>) -> io::Result<Option<()>> {
         if self.write_continuation {
             return Ok(Some(()));
         }
@@ -193,7 +193,7 @@ impl Connection {
         let mut send_buf = [0u8; 8];
         BigEndian::write_u64(&mut send_buf, len as u64);
 
-        match self.sock.try_write(&mut send_buf) {
+        match self.sock.try_write(&send_buf) {
             Ok(None) => {
                 debug!("client flushing buf; WouldBlock");
 
@@ -215,7 +215,7 @@ impl Connection {
     /// This will cause the connection to register interests in write events with the event loop.
     /// The connection can still safely have an interest in read events. The read and write buffers
     /// operate independently of each other.
-    pub fn send_message(&mut self, message: Vec<u8>) -> io::Result<()> {
+    pub fn send_message(&mut self, message: Rc<Vec<u8>>) -> io::Result<()> {
         trace!("connection send_message; token={:?}", self.token);
 
         self.send_queue.push(message);
