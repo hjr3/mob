@@ -1,4 +1,5 @@
 use std::io;
+use std::rc::Rc;
 
 use mio::*;
 use mio::tcp::*;
@@ -214,11 +215,10 @@ impl Server {
 
         while let Some(message) = try!(self.find_connection_by_token(token).readable()) {
 
+            let rc_message = Rc::new(message);
             // Queue up a write for all connected clients.
             for c in self.conns.iter_mut() {
-                // TODO: use references so we don't have to clone
-                let conn_send_buf = message.clone();
-                c.send_message(conn_send_buf)
+                c.send_message(rc_message.clone())
                     .unwrap_or_else(|e| {
                         error!("Failed to queue message for {:?}: {:?}", c.token, e);
                         c.mark_reset();
