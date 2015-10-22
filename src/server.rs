@@ -35,6 +35,7 @@ impl Handler for Server {
                     .unwrap_or_else(|e| {
                         warn!("Reregister failed {:?}", e);
                         c.mark_reset();
+                        reset_tokens.push(c.token);
                     });
             }
         }
