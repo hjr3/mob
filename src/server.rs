@@ -30,7 +30,7 @@ impl Handler for Server {
         for c in self.conns.iter_mut() {
             if c.is_reset() {
                 reset_tokens.push(c.token);
-            } else {
+            } else if c.is_idle() {
                 c.reregister(event_loop)
                     .unwrap_or_else(|e| {
                         warn!("Reregister failed {:?}", e);
@@ -106,6 +106,10 @@ impl Handler for Server {
                         self.find_connection_by_token(token).mark_reset();
                     });
             }
+        }
+
+        if self.token != token {
+            self.find_connection_by_token(token).mark_idle();
         }
     }
 }
