@@ -26,6 +26,9 @@ pub struct Connection {
     // messages waiting to be sent out
     send_queue: Vec<Rc<Vec<u8>>>,
 
+    // track whether a connection needs to be (re)registered
+    is_idle: bool,
+
     // track whether a connection is reset
     is_reset: bool,
 
@@ -45,6 +48,7 @@ impl Connection {
             token: token,
             interest: EventSet::hup(),
             send_queue: Vec::new(),
+            is_idle: true,
             is_reset: false,
             read_continuation: None,
             write_continuation: false,
@@ -240,7 +244,10 @@ impl Connection {
             self.token,
             self.interest,
             PollOpt::edge() | PollOpt::oneshot()
-        ).or_else(|e| {
+        ).and_then(|(),| {
+            self.is_idle = false;
+            Ok(())
+        }).or_else(|e| {
             error!("Failed to reregister {:?}, {:?}", self.token, e);
             Err(e)
         })
@@ -255,7 +262,10 @@ impl Connection {
             self.token,
             self.interest,
             PollOpt::edge() | PollOpt::oneshot()
-        ).or_else(|e| {
+        ).and_then(|(),| {
+            self.is_idle = false;
+            Ok(())
+        }).or_else(|e| {
             error!("Failed to reregister {:?}, {:?}", self.token, e);
             Err(e)
         })
@@ -278,7 +288,19 @@ impl Connection {
         self.is_reset = true;
     }
 
+    #[inline]
     pub fn is_reset(&self) -> bool {
         self.is_reset
+    }
+
+    pub fn mark_idle(&mut self) {
+        trace!("connection mark_idle; token={:?}", self.token);
+
+        self.is_idle = true;
+    }
+
+    #[inline]
+    pub fn is_idle(&self) -> bool {
+        self.is_idle
     }
 }
