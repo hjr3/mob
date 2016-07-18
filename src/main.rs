@@ -34,7 +34,7 @@ fn main() {
     let mut server = Server::new(sock);
     server.register(&mut event_loop).ok().expect("Failed to register server with event loop");
 
-    info!("Even loop starting...");
+    info!("Event loop starting...");
     event_loop.run(&mut server).unwrap_or_else(|e| {
         error!("Event loop failed {:?}", e);
     });
