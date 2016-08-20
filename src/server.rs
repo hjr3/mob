@@ -3,9 +3,11 @@ use std::rc::Rc;
 
 use mio::*;
 use mio::tcp::*;
-use mio::util::Slab;
+use slab;
 
 use connection::Connection;
+
+type Slab<T> = slab::Slab<T, Token>;
 
 pub struct Server {
     // main socket for our server

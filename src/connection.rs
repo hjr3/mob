@@ -73,23 +73,17 @@ impl Connection {
             return Ok(None);
         }
 
-        debug!("Expected message length: {}", msg_len);
-        let mut recv_buf : Vec<u8> = Vec::with_capacity(msg_len as usize);
+        let msg_len = msg_len as usize;
+
+        debug!("Expected message length is {}", msg_len);
+        let mut recv_buf : Vec<u8> = Vec::with_capacity(msg_len);
+        unsafe { recv_buf.set_len(msg_len); }
 
         // UFCS: resolve "multiple applicable items in scope [E0034]" error
         let sock_ref = <TcpStream as Read>::by_ref(&mut self.sock);
 
-        match sock_ref.take(msg_len as u64).try_read_buf(&mut recv_buf) {
-            Ok(None) => {
-                debug!("CONN : read encountered WouldBlock");
-
-                // We are being forced to try again, but we already read the two bytes off of the
-                // wire that determined the length. We need to store the message length so we can
-                // resume next time we get readable.
-                self.read_continuation = Some(msg_len as u64);
-                Ok(None)
-            },
-            Ok(Some(n)) => {
+        match sock_ref.take(msg_len as u64).read(&mut recv_buf) {
+            Ok(n) => {
                 debug!("CONN : we read {} bytes", n);
 
                 if n < msg_len as usize {
@@ -98,11 +92,22 @@ impl Connection {
 
                 self.read_continuation = None;
 
-                Ok(Some(recv_buf))
-            },
+                Ok(Some(recv_buf.to_vec()))
+            }
             Err(e) => {
-                error!("Failed to read buffer for token {:?}, error: {}", self.token, e);
-                Err(e)
+
+                if e.kind() == ErrorKind::WouldBlock {
+                    debug!("CONN : read encountered WouldBlock");
+
+                    // We are being forced to try again, but we already read the two bytes off of the
+                    // wire that determined the length. We need to store the message length so we can
+                    // resume next time we get readable.
+                    self.read_continuation = Some(msg_len as u64);
+                    Ok(None)
+                } else {
+                    error!("Failed to read buffer for token {:?}, error: {}", self.token, e);
+                    Err(e)
+                }
             }
         }
     }
@@ -114,13 +119,14 @@ impl Connection {
 
         let mut buf = [0u8; 8];
 
-        let bytes = match self.sock.try_read(&mut buf) {
-            Ok(None) => {
-                return Ok(None);
-            },
-            Ok(Some(n)) => n,
+        let bytes = match self.sock.read(&mut buf) {
+            Ok(n) => n,
             Err(e) => {
-                return Err(e);
+                if e.kind() == ErrorKind::WouldBlock {
+                    return Ok(None);
+                } else {
+                    return Err(e);
+                }
             }
         };
 
@@ -159,23 +165,24 @@ impl Connection {
                     }
                 }
 
-                match self.sock.try_write(&*buf) {
-                    Ok(None) => {
-                        debug!("client flushing buf; WouldBlock");
-
-                        // put message back into the queue so we can try again
-                        self.send_queue.push(buf);
-                        self.write_continuation = true;
-                        Ok(())
-                    },
-                    Ok(Some(n)) => {
+                match self.sock.write(&*buf) {
+                    Ok(n) => {
                         debug!("CONN : we wrote {} bytes", n);
                         self.write_continuation = false;
                         Ok(())
                     },
                     Err(e) => {
-                        error!("Failed to send buffer for {:?}, error: {}", self.token, e);
-                        Err(e)
+                        if e.kind() == ErrorKind::WouldBlock {
+                            debug!("client flushing buf; WouldBlock");
+
+                            // put message back into the queue so we can try again
+                            self.send_queue.push(buf);
+                            self.write_continuation = true;
+                            Ok(())
+                        } else {
+                            error!("Failed to send buffer for {:?}, error: {}", self.token, e);
+                            Err(e)
+                        }
                     }
                 }
             })
@@ -197,19 +204,20 @@ impl Connection {
         let mut send_buf = [0u8; 8];
         BigEndian::write_u64(&mut send_buf, len as u64);
 
-        match self.sock.try_write(&send_buf) {
-            Ok(None) => {
-                debug!("client flushing buf; WouldBlock");
-
-                Ok(None)
-            },
-            Ok(Some(n)) => {
+        match self.sock.write(&send_buf) {
+            Ok(n) => {
                 debug!("Sent message length of {} bytes", n);
                 Ok(Some(()))
-            },
+            }
             Err(e) => {
-                error!("Failed to send buffer for {:?}, error: {}", self.token, e);
-                Err(e)
+                if e.kind() == ErrorKind::WouldBlock {
+                    debug!("client flushing buf; WouldBlock");
+
+                    Ok(None)
+                } else {
+                    error!("Failed to send buffer for {:?}, error: {}", self.token, e);
+                    Err(e)
+                }
             }
         }
     }

@@ -1,5 +1,6 @@
 extern crate byteorder;
 extern crate mio;
+extern crate slab;
 
 #[macro_use] extern crate log;
 extern crate env_logger;
