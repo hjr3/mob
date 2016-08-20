@@ -4,6 +4,9 @@ A multi-echo server written in Rust using the mio async-io library.
 
 [![Build Status](https://travis-ci.org/hjr3/mob.svg?branch=master)](https://travis-ci.org/hjr3/mob)
 
+* `master` branch is currently setup to work against the master branch of mio (aka `0.6.0-dev`)
+* `0.5` branch is setup to work against the `0.5` branch of mio
+
 ## Install
 
 Run `cargo build` to build both `mob-server` and `mob-client`.
