@@ -26,17 +26,13 @@ fn main() {
         .ok().expect("Failed to parse host:port string");
     let sock = TcpListener::bind(&addr).ok().expect("Failed to bind address");
 
-    let mut event_loop = EventLoop::new().ok().expect("Failed to create event loop");
+    // Create a polling object that will be used by the server to receive events
+    let mut poll = Poll::new().expect("Failed to create Poll");
 
-    // Create our Server object and register that with the event loop. I am hiding away
-    // the details of how registering works inside of the `Server#register` function. One reason I
+    // Create our Server object and start polling for events. I am hiding away
+    // the details of how registering works inside of the `Server` object. One reason I
     // really like this is to get around having to have `const SERVER = Token(0)` at the top of my
     // file. It also keeps our polling options inside `Server`.
     let mut server = Server::new(sock);
-    server.register(&mut event_loop).ok().expect("Failed to register server with event loop");
-
-    info!("Event loop starting...");
-    event_loop.run(&mut server).unwrap_or_else(|e| {
-        error!("Event loop failed {:?}", e);
-    });
+    server.run(&mut poll).expect("Failed to run server");
 }

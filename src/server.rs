@@ -18,13 +18,79 @@ pub struct Server {
 
     // a list of connections _accepted_ by our server
     conns: Slab<Connection>,
+
+    // a list of events to process
+    events: Events,
 }
 
-impl Handler for Server {
-    type Timeout = ();
-    type Message = ();
+impl Server {
+    pub fn new(sock: TcpListener) -> Server {
+        Server {
+            sock: sock,
 
-    fn tick(&mut self, event_loop: &mut EventLoop<Server>) {
+            // I don't use Token(0) because kqueue will send stuff to Token(0)
+            // by default causing really strange behavior. This way, if I see
+            // something as Token(0), I know there are kqueue shenanigans
+            // going on.
+            token: Token(1),
+
+            // SERVER is Token(1), so start after that
+            // we can deal with a max of 126 connections
+            conns: Slab::new_starting_at(Token(2), 128),
+
+            // list of events from the poller that the server needs to process
+            events: Events::new(),
+        }
+    }
+
+    pub fn run(&mut self, poll: &mut Poll) -> io::Result<()> {
+
+        try!(self.register(poll));
+
+        info!("Server run loop starting...");
+        loop {
+            let cnt = try!(poll.poll(&mut self.events, None));
+
+            let mut i = 0;
+
+            trace!("processing events... cnt={}; len={}", cnt, self.events.len());
+
+            // Iterate over the notifications. Each event provides the token
+            // it was registered with (which usually represents, at least, the
+            // handle that the event is about) as well as information about
+            // what kind of event occurred (readable, writable, signal, etc.)
+            while i < cnt {
+                // TODO this would be nice if it would turn a Result type. trying to convert this
+                // into a io::Result runs into a problem because .ok_or() expects std::Result and
+                // not io::Result
+                let event = self.events.get(i).expect("Failed to get event");
+
+                trace!("event={:?}; idx={:?}", event, i);
+                self.ready(poll, event.token(), event.kind());
+
+                i += 1;
+            }
+
+            self.tick(poll);
+        }
+    }
+
+    /// Register Server with the poller.
+    ///
+    /// This keeps the registration details neatly tucked away inside of our implementation.
+    pub fn register(&mut self, poll: &mut Poll) -> io::Result<()> {
+        poll.register(
+            &self.sock,
+            self.token,
+            EventSet::readable(),
+            PollOpt::edge()
+        ).or_else(|e| {
+            error!("Failed to register server {:?}, {:?}", self.token, e);
+            Err(e)
+        })
+    }
+
+    fn tick(&mut self, poll: &mut Poll) {
         trace!("Handling end of tick");
 
         let mut reset_tokens = Vec::new();
@@ -33,7 +99,7 @@ impl Handler for Server {
             if c.is_reset() {
                 reset_tokens.push(c.token);
             } else if c.is_idle() {
-                c.reregister(event_loop)
+                c.reregister(poll)
                     .unwrap_or_else(|e| {
                         warn!("Reregister failed {:?}", e);
                         c.mark_reset();
@@ -54,17 +120,17 @@ impl Handler for Server {
         }
     }
 
-    fn ready(&mut self, event_loop: &mut EventLoop<Server>, token: Token, events: EventSet) {
-        debug!("{:?} events = {:?}", token, events);
+    fn ready(&mut self, poll: &mut Poll, token: Token, event: EventSet) {
+        debug!("{:?} event = {:?}", token, event);
         assert!(token != Token(0), "[BUG]: Received event for Server token {:?}", token);
 
-        if events.is_error() {
+        if event.is_error() {
             warn!("Error event for {:?}", token);
             self.find_connection_by_token(token).mark_reset();
             return;
         }
 
-        if events.is_hup() {
+        if event.is_hup() {
             trace!("Hup event for {:?}", token);
             self.find_connection_by_token(token).mark_reset();
             return;
@@ -72,7 +138,7 @@ impl Handler for Server {
 
         // We never expect a write event for our `Server` token . A write event for any other token
         // should be handed off to that connection.
-        if events.is_writable() {
+        if event.is_writable() {
             trace!("Write event for {:?}", token);
             assert!(self.token != token, "Received writable event for Server");
 
@@ -92,10 +158,10 @@ impl Handler for Server {
 
         // A read event for our `Server` token means we are establishing a new connection. A read
         // event for any other token should be handed off to that connection.
-        if events.is_readable() {
+        if event.is_readable() {
             trace!("Read event for {:?}", token);
             if self.token == token {
-                self.accept(event_loop);
+                self.accept(poll);
             } else {
 
                 if self.find_connection_by_token(token).is_reset() {
@@ -115,60 +181,12 @@ impl Handler for Server {
             self.find_connection_by_token(token).mark_idle();
         }
     }
-}
-
-impl Server {
-    pub fn new(sock: TcpListener) -> Server {
-        Server {
-            sock: sock,
-
-            // I don't use Token(0) because kqueue will send stuff to Token(0)
-            // by default causing really strange behavior. This way, if I see
-            // something as Token(0), I know there are kqueue shenanigans
-            // going on.
-            token: Token(1),
-
-            // SERVER is Token(1), so start after that
-            // we can deal with a max of 126 connections
-            conns: Slab::new_starting_at(Token(2), 128),
-        }
-    }
-
-    /// Register Server with the event loop.
-    ///
-    /// This keeps the registration details neatly tucked away inside of our implementation.
-    pub fn register(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<()> {
-        event_loop.register(
-            &self.sock,
-            self.token,
-            EventSet::readable(),
-            PollOpt::edge()
-        ).or_else(|e| {
-            error!("Failed to register server {:?}, {:?}", self.token, e);
-            Err(e)
-        })
-    }
-
-    /// Reregister Server with the event loop.
-    ///
-    /// This keeps the registration details neatly tucked away inside of our implementation.
-    // fn reregister(&mut self, event_loop: &mut EventLoop<Server>) {
-    //     event_loop.reregister(
-    //         &self.sock,
-    //         self.token,
-    //         EventSet::readable(),
-    //         PollOpt::edge()
-    //     ).unwrap_or_else(|e| {
-    //         error!("Failed to reregister server {:?}, {:?}", self.token, e);
-    //         event_loop.shutdown();
-    //     })
-    // }
 
     /// Accept a _new_ client connection.
     ///
-    /// The server will keep track of the new connection and forward any events from the event loop
+    /// The server will keep track of the new connection and forward any events from the poller
     /// to this connection.
-    fn accept(&mut self, event_loop: &mut EventLoop<Server>) {
+    fn accept(&mut self, poll: &mut Poll) {
         debug!("server accepting new socket");
 
         loop {
@@ -191,15 +209,15 @@ impl Server {
             };
 
             match self.conns.insert_with(|token| {
-                debug!("registering {:?} with event loop", token);
+                debug!("registering {:?} with poller", token);
                 Connection::new(sock, token)
             }) {
                 Some(token) => {
                     // If we successfully insert, then register our connection.
-                    match self.find_connection_by_token(token).register(event_loop) {
+                    match self.find_connection_by_token(token).register(poll) {
                         Ok(_) => {},
                         Err(e) => {
-                            error!("Failed to register {:?} connection with event loop, {:?}", token, e);
+                            error!("Failed to register {:?} connection with poller, {:?}", token, e);
                             self.conns.remove(token);
                         }
                     }
@@ -214,7 +232,7 @@ impl Server {
 
     /// Forward a readable event to an established connection.
     ///
-    /// Connections are identified by the token provided to us from the event loop. Once a read has
+    /// Connections are identified by the token provided to us from the poller. Once a read has
     /// finished, push the receive buffer into the all the existing connections so we can
     /// broadcast.
     fn readable(&mut self, token: Token) -> io::Result<()> {

@@ -8,8 +8,6 @@ use byteorder::{ByteOrder, BigEndian};
 use mio::*;
 use mio::tcp::*;
 
-use server::Server;
-
 /// A stateful wrapper around a non-blocking stream. This connection is not
 /// the SERVER connection. This connection represents the client connections
 /// _accepted_ by the SERVER connection.
@@ -17,7 +15,7 @@ pub struct Connection {
     // handle to the accepted socket
     sock: TcpStream,
 
-    // token used to register with the event loop
+    // token used to register with the poller
     pub token: Token,
 
     // set of events we are interested in
@@ -55,7 +53,7 @@ impl Connection {
         }
     }
 
-    /// Handle read event from event loop.
+    /// Handle read event from poller.
     ///
     /// The Handler must continue calling until None is returned.
     ///
@@ -139,7 +137,7 @@ impl Connection {
         Ok(Some(msg_len))
     }
 
-    /// Handle a writable event from the event loop.
+    /// Handle a writable event from the poller.
     ///
     /// Send one message from the send queue to the client. If the queue is empty, remove interest
     /// in write events.
@@ -224,7 +222,7 @@ impl Connection {
 
     /// Queue an outgoing message to the client.
     ///
-    /// This will cause the connection to register interests in write events with the event loop.
+    /// This will cause the connection to register interests in write events with the poller.
     /// The connection can still safely have an interest in read events. The read and write buffers
     /// operate independently of each other.
     pub fn send_message(&mut self, message: Rc<Vec<u8>>) -> io::Result<()> {
@@ -239,15 +237,15 @@ impl Connection {
         Ok(())
     }
 
-    /// Register interest in read events with the event_loop.
+    /// Register interest in read events with poll.
     ///
-    /// This will let our connection accept reads starting next event loop tick.
-    pub fn register(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<()> {
+    /// This will let our connection accept reads starting next poller tick.
+    pub fn register(&mut self, poll: &mut Poll) -> io::Result<()> {
         trace!("connection register; token={:?}", self.token);
 
         self.interest.insert(EventSet::readable());
 
-        event_loop.register(
+        poll.register(
             &self.sock,
             self.token,
             self.interest,
@@ -261,11 +259,11 @@ impl Connection {
         })
     }
 
-    /// Re-register interest in read events with the event_loop.
-    pub fn reregister(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<()> {
+    /// Re-register interest in read events with poll.
+    pub fn reregister(&mut self, poll: &mut Poll) -> io::Result<()> {
         trace!("connection reregister; token={:?}", self.token);
 
-        event_loop.reregister(
+        poll.reregister(
             &self.sock,
             self.token,
             self.interest,
@@ -278,17 +276,6 @@ impl Connection {
             Err(e)
         })
     }
-
-    //pub fn deregister(&mut self, event_loop: &mut EventLoop<Server>) -> io::Result<()> {
-    //    trace!("connection deregister; token={:?}", self.token);
-
-    //    event_loop.deregister(
-    //        &self.sock
-    //    ).or_else(|e| {
-    //        error!("Failed to deregister {:?}, {:?}", self.token, e);
-    //        Err(e)
-    //    })
-    //}
 
     pub fn mark_reset(&mut self) {
         trace!("connection mark_reset; token={:?}", self.token);
