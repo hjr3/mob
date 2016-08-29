@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, ErrorKind};
 use std::rc::Rc;
 
 use mio::*;
@@ -82,7 +82,7 @@ impl Server {
         poll.register(
             &self.sock,
             self.token,
-            EventSet::readable(),
+            Ready::readable(),
             PollOpt::edge()
         ).or_else(|e| {
             error!("Failed to register server {:?}, {:?}", self.token, e);
@@ -120,7 +120,7 @@ impl Server {
         }
     }
 
-    fn ready(&mut self, poll: &mut Poll, token: Token, event: EventSet) {
+    fn ready(&mut self, poll: &mut Poll, token: Token, event: Ready) {
         debug!("{:?} event = {:?}", token, event);
         assert!(token != Token(0), "[BUG]: Received event for Server token {:?}", token);
 
@@ -193,17 +193,13 @@ impl Server {
             // Log an error if there is no socket, but otherwise move on so we do not tear down the
             // entire server.
             let sock = match self.sock.accept() {
-                Ok(s) => {
-                    match s {
-                        Some((sock, _)) => sock,
-                        None => {
-                            debug!("accept encountered WouldBlock");
-                            return;
-                        }
-                    }
-                },
+                Ok((sock, _)) => sock,
                 Err(e) => {
-                    error!("Failed to accept new socket, {:?}", e);
+                    if e.kind() == ErrorKind::WouldBlock {
+                        debug!("accept encountered WouldBlock");
+                    } else {
+                        error!("Failed to accept new socket, {:?}", e);
+                    }
                     return;
                 }
             };

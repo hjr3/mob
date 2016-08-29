@@ -19,7 +19,7 @@ pub struct Connection {
     pub token: Token,
 
     // set of events we are interested in
-    interest: EventSet,
+    interest: Ready,
 
     // messages waiting to be sent out
     send_queue: Vec<Rc<Vec<u8>>>,
@@ -44,7 +44,7 @@ impl Connection {
         Connection {
             sock: sock,
             token: token,
-            interest: EventSet::hup(),
+            interest: Ready::hup(),
             send_queue: Vec::new(),
             is_idle: true,
             is_reset: false,
@@ -187,7 +187,7 @@ impl Connection {
         );
 
         if self.send_queue.is_empty() {
-            self.interest.remove(EventSet::writable());
+            self.interest.remove(Ready::writable());
         }
 
         Ok(())
@@ -231,7 +231,7 @@ impl Connection {
         self.send_queue.push(message);
 
         if !self.interest.is_writable() {
-            self.interest.insert(EventSet::writable());
+            self.interest.insert(Ready::writable());
         }
 
         Ok(())
@@ -243,7 +243,7 @@ impl Connection {
     pub fn register(&mut self, poll: &mut Poll) -> io::Result<()> {
         trace!("connection register; token={:?}", self.token);
 
-        self.interest.insert(EventSet::readable());
+        self.interest.insert(Ready::readable());
 
         poll.register(
             &self.sock,
