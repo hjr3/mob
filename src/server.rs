@@ -28,18 +28,16 @@ impl Server {
         Server {
             sock: sock,
 
-            // I don't use Token(0) because kqueue will send stuff to Token(0)
-            // by default causing really strange behavior. This way, if I see
-            // something as Token(0), I know there are kqueue shenanigans
-            // going on.
-            token: Token(1),
+            // Give our server token a number much larger than our slab capacity. The slab used to
+            // track an internal offset, but does not anymore.
+            token: Token(10_000_000),
 
             // SERVER is Token(1), so start after that
             // we can deal with a max of 126 connections
-            conns: Slab::new_starting_at(Token(2), 128),
+            conns: Slab::with_capacity(128),
 
             // list of events from the poller that the server needs to process
-            events: Events::new(),
+            events: Events::with_capacity(1024),
         }
     }
 
@@ -122,7 +120,6 @@ impl Server {
 
     fn ready(&mut self, poll: &mut Poll, token: Token, event: Ready) {
         debug!("{:?} event = {:?}", token, event);
-        assert!(token != Token(0), "[BUG]: Received event for Server token {:?}", token);
 
         if event.is_error() {
             warn!("Error event for {:?}", token);
@@ -204,25 +201,25 @@ impl Server {
                 }
             };
 
-            match self.conns.insert_with(|token| {
-                debug!("registering {:?} with poller", token);
-                Connection::new(sock, token)
-            }) {
-                Some(token) => {
-                    // If we successfully insert, then register our connection.
-                    match self.find_connection_by_token(token).register(poll) {
-                        Ok(_) => {},
-                        Err(e) => {
-                            error!("Failed to register {:?} connection with poller, {:?}", token, e);
-                            self.conns.remove(token);
-                        }
-                    }
-                },
+            let token = match self.conns.vacant_entry() {
+                Some(entry) => {
+                    debug!("registering {:?} with poller", entry.index());
+                    let c = Connection::new(sock, entry.index());
+                    entry.insert(c).index()
+                }
                 None => {
-                    // If we fail to insert, `conn` will go out of scope and be dropped.
                     error!("Failed to insert connection into slab");
+                    return;
                 }
             };
+
+            match self.find_connection_by_token(token).register(poll) {
+                Ok(_) => {},
+                Err(e) => {
+                    error!("Failed to register {:?} connection with poller, {:?}", token, e);
+                    self.conns.remove(token);
+                }
+            }
         }
     }
 

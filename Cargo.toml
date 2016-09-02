@@ -7,8 +7,8 @@ authors = ["Herman J. Radtke III <hermanradtke@gmail.com>"]
 byteorder = "0.3"
 env_logger = "0.3.1"
 log = "0.3.1"
-mio = { git = "https://github.com/carllerche/mio", rev = "ce5d4fb" }
-slab = { git = "https://github.com/carllerche/slab", rev = "5476efcafb" }
+mio = "0.6.0"
+slab = "0.3.0"
 
 [[bin]]
 name = "mob-server"
