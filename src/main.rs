@@ -20,11 +20,11 @@ fn main() {
     // Before doing anything, let us register a logger. The mio library has really good logging
     // at the _trace_ and _debug_ levels. Having a logger setup is invaluable when trying to
     // figure out why something is not working correctly.
-    env_logger::init().ok().expect("Failed to init logger");
+    env_logger::init().expect("Failed to init logger");
 
     let addr = "127.0.0.1:8000".parse::<SocketAddr>()
-        .ok().expect("Failed to parse host:port string");
-    let sock = TcpListener::bind(&addr).ok().expect("Failed to bind address");
+        .expect("Failed to parse host:port string");
+    let sock = TcpListener::bind(&addr).expect("Failed to bind address");
 
     // Create a polling object that will be used by the server to receive events
     let mut poll = Poll::new().expect("Failed to create Poll");
