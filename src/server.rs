@@ -248,7 +248,7 @@ impl Server {
     }
 
     /// Find a connection in the slab using the given token.
-    fn find_connection_by_token<'a>(&'a mut self, token: Token) -> &'a mut Connection {
+    fn find_connection_by_token(&mut self, token: Token) -> &mut Connection {
         &mut self.conns[token]
     }
 }
