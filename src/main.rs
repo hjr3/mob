@@ -10,8 +10,8 @@ mod connection;
 
 use std::net::SocketAddr;
 
-use mio::*;
-use mio::tcp::*;
+use mio::Poll;
+use mio::net::TcpListener;
 
 use server::*;
 

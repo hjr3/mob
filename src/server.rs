@@ -1,8 +1,10 @@
 use std::io::{self, ErrorKind};
 use std::rc::Rc;
 
-use mio::*;
-use mio::tcp::*;
+use mio::{Events, Poll, PollOpt, Ready, Token};
+use mio::net::TcpListener;
+use mio::unix::UnixReady;
+
 use slab;
 
 use connection::Connection;
@@ -64,7 +66,7 @@ impl Server {
                 let event = self.events.get(i).expect("Failed to get event");
 
                 trace!("event={:?}; idx={:?}", event, i);
-                self.ready(poll, event.token(), event.kind());
+                self.ready(poll, event.token(), event.readiness());
 
                 i += 1;
             }
@@ -121,6 +123,8 @@ impl Server {
     fn ready(&mut self, poll: &mut Poll, token: Token, event: Ready) {
         debug!("{:?} event = {:?}", token, event);
 
+        let event = UnixReady::from(event);
+
         if event.is_error() {
             warn!("Error event for {:?}", token);
             self.find_connection_by_token(token).mark_reset();
@@ -132,6 +136,8 @@ impl Server {
             self.find_connection_by_token(token).mark_reset();
             return;
         }
+
+        let event = Ready::from(event);
 
         // We never expect a write event for our `Server` token . A write event for any other token
         // should be handed off to that connection.
