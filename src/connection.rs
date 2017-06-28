@@ -5,8 +5,9 @@ use std::rc::Rc;
 
 use byteorder::{ByteOrder, BigEndian};
 
-use mio::*;
-use mio::tcp::*;
+use mio::{Poll, PollOpt, Ready, Token};
+use mio::net::TcpStream;
+use mio::unix::UnixReady;
 
 /// A stateful wrapper around a non-blocking stream. This connection is not
 /// the SERVER connection. This connection represents the client connections
@@ -44,7 +45,7 @@ impl Connection {
         Connection {
             sock: sock,
             token: token,
-            interest: Ready::hup(),
+            interest: Ready::from(UnixReady::hup()),
             send_queue: Vec::new(),
             is_idle: true,
             is_reset: false,
