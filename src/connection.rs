@@ -75,6 +75,10 @@ impl Connection {
         let msg_len = msg_len as usize;
 
         debug!("Expected message length is {}", msg_len);
+        
+        // Here we allocate and set the length with unsafe code. The risks of this are discussed
+        // at https://stackoverflow.com/a/30979689/329496 and are mitigated as recv_buf is 
+        // abandoned below if we don't read msg_leg bytes from the socket
         let mut recv_buf : Vec<u8> = Vec::with_capacity(msg_len);
         unsafe { recv_buf.set_len(msg_len); }
 
