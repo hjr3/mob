@@ -168,10 +168,19 @@ impl Connection {
                     }
                 }
 
+                let len = buf.len();
                 match self.sock.write(&*buf) {
                     Ok(n) => {
                         debug!("CONN : we wrote {} bytes", n);
-                        self.write_continuation = false;
+                        // if we wrote a partial message, then put remaining part of message back
+                        // into the queue so we can try again
+                        if n < len {
+                            let remaining = Rc::new(buf[n..].to_vec());
+                            self.send_queue.push(remaining);
+                            self.write_continuation = true;
+                        } else {
+                            self.write_continuation = false;
+                        }
                         Ok(())
                     },
                     Err(e) => {
@@ -207,10 +216,17 @@ impl Connection {
         let mut send_buf = [0u8; 8];
         BigEndian::write_u64(&mut send_buf, len as u64);
 
+        let len = send_buf.len();
         match self.sock.write(&send_buf) {
             Ok(n) => {
-                debug!("Sent message length of {} bytes", n);
-                Ok(Some(()))
+                if n < len {
+                    let e = Error::new(ErrorKind::Other, "Message length failed");
+                    error!("Failed to send message length for {:?}, error: {}", self.token, e);
+                    Err(e)
+                } else {
+                    debug!("Sent message length of {} bytes", n);
+                    Ok(Some(()))
+                }
             }
             Err(e) => {
                 if e.kind() == ErrorKind::WouldBlock {
