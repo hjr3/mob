@@ -23,13 +23,8 @@ pub struct Connection {
     interest: Ready,
 
     // messages waiting to be sent out
+    // TODO: should use VecDequeue?
     send_queue: Vec<Rc<Vec<u8>>>,
-
-    // track whether a connection needs to be (re)registered
-    is_idle: bool,
-
-    // track whether a connection is reset
-    is_reset: bool,
 
     // track whether a read received `WouldBlock` and store the number of
     // byte we are supposed to read
@@ -47,8 +42,6 @@ impl Connection {
             token: token,
             interest: Ready::from(UnixReady::hup()),
             send_queue: Vec::new(),
-            is_idle: true,
-            is_reset: false,
             read_continuation: None,
             write_continuation: false,
         }
@@ -62,7 +55,7 @@ impl Connection {
     /// listening connections.
     pub fn readable(&mut self) -> io::Result<Option<Vec<u8>>> {
 
-        let msg_len = match try!(self.read_message_length()) {
+        let msg_len = match self.read_message_length()? {
             None => { return Ok(None); },
             Some(n) => n,
         };
@@ -75,9 +68,9 @@ impl Connection {
         let msg_len = msg_len as usize;
 
         debug!("Expected message length is {}", msg_len);
-        
+
         // Here we allocate and set the length with unsafe code. The risks of this are discussed
-        // at https://stackoverflow.com/a/30979689/329496 and are mitigated as recv_buf is 
+        // at https://stackoverflow.com/a/30979689/329496 and are mitigated as recv_buf is
         // abandoned below if we don't read msg_leg bytes from the socket
         let mut recv_buf : Vec<u8> = Vec::with_capacity(msg_len);
         unsafe { recv_buf.set_len(msg_len); }
@@ -89,6 +82,7 @@ impl Connection {
             Ok(n) => {
                 debug!("CONN : we read {} bytes", n);
 
+                // TODO handle a read continuation here
                 if n < msg_len as usize {
                     return Err(Error::new(ErrorKind::InvalidData, "Did not read enough bytes"));
                 }
@@ -150,7 +144,7 @@ impl Connection {
     /// flush until the kernel sends back EAGAIN?
     pub fn writable(&mut self) -> io::Result<()> {
 
-        try!(self.send_queue.pop()
+        self.send_queue.pop()
             .ok_or(Error::new(ErrorKind::Other, "Could not pop send queue"))
             .and_then(|buf| {
                 match self.write_message_length(&buf) {
@@ -197,8 +191,7 @@ impl Connection {
                         }
                     }
                 }
-            })
-        );
+            })?;
 
         if self.send_queue.is_empty() {
             self.interest.remove(Ready::writable());
@@ -246,7 +239,7 @@ impl Connection {
     /// This will cause the connection to register interests in write events with the poller.
     /// The connection can still safely have an interest in read events. The read and write buffers
     /// operate independently of each other.
-    pub fn send_message(&mut self, message: Rc<Vec<u8>>) -> io::Result<()> {
+    pub fn send_message(&mut self, message: Rc<Vec<u8>>) {
         trace!("connection send_message; token={:?}", self.token);
 
         self.send_queue.push(message);
@@ -254,8 +247,6 @@ impl Connection {
         if !self.interest.is_writable() {
             self.interest.insert(Ready::writable());
         }
-
-        Ok(())
     }
 
     /// Register interest in read events with poll.
@@ -271,10 +262,7 @@ impl Connection {
             self.token,
             self.interest,
             PollOpt::edge() | PollOpt::oneshot()
-        ).and_then(|(),| {
-            self.is_idle = false;
-            Ok(())
-        }).or_else(|e| {
+        ).or_else(|e| {
             error!("Failed to reregister {:?}, {:?}", self.token, e);
             Err(e)
         })
@@ -289,34 +277,9 @@ impl Connection {
             self.token,
             self.interest,
             PollOpt::edge() | PollOpt::oneshot()
-        ).and_then(|(),| {
-            self.is_idle = false;
-            Ok(())
-        }).or_else(|e| {
+        ).or_else(|e| {
             error!("Failed to reregister {:?}, {:?}", self.token, e);
             Err(e)
         })
-    }
-
-    pub fn mark_reset(&mut self) {
-        trace!("connection mark_reset; token={:?}", self.token);
-
-        self.is_reset = true;
-    }
-
-    #[inline]
-    pub fn is_reset(&self) -> bool {
-        self.is_reset
-    }
-
-    pub fn mark_idle(&mut self) {
-        trace!("connection mark_idle; token={:?}", self.token);
-
-        self.is_idle = true;
-    }
-
-    #[inline]
-    pub fn is_idle(&self) -> bool {
-        self.is_idle
     }
 }

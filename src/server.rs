@@ -15,7 +15,7 @@ pub struct Server {
     // main socket for our server
     sock: TcpListener,
 
-    // token of our server. we keep track of it here instead of doing `const SERVER = Token(0)`.
+    // token of our server. we keep track of it here instead of doing `const SERVER = Token(_)`.
     token: Token,
 
     // a list of connections _accepted_ by our server
@@ -34,8 +34,7 @@ impl Server {
             // track an internal offset, but does not anymore.
             token: Token(10_000_000),
 
-            // SERVER is Token(1), so start after that
-            // we can deal with a max of 126 connections
+            // We will handle a max of 128 connections
             conns: Slab::with_capacity(128),
 
             // list of events from the poller that the server needs to process
@@ -45,11 +44,11 @@ impl Server {
 
     pub fn run(&mut self, poll: &mut Poll) -> io::Result<()> {
 
-        try!(self.register(poll));
+        self.register(poll)?;
 
         info!("Server run loop starting...");
         loop {
-            let cnt = try!(poll.poll(&mut self.events, None));
+            let cnt = poll.poll(&mut self.events, None)?;
 
             let mut i = 0;
 
@@ -70,8 +69,6 @@ impl Server {
 
                 i += 1;
             }
-
-            self.tick(poll);
         }
     }
 
@@ -90,32 +87,14 @@ impl Server {
         })
     }
 
-    fn tick(&mut self, poll: &mut Poll) {
-        trace!("Handling end of tick");
-
-        let mut reset_tokens = Vec::new();
-
-        for c in self.conns.iter_mut() {
-            if c.is_reset() {
-                reset_tokens.push(c.token);
-            } else if c.is_idle() {
-                c.reregister(poll)
-                    .unwrap_or_else(|e| {
-                        warn!("Reregister failed {:?}", e);
-                        c.mark_reset();
-                        reset_tokens.push(c.token);
-                    });
+    /// Remove a token from the slab
+    fn remove_token(&mut self, token: Token) {
+        match self.conns.remove(token) {
+            Some(_c) => {
+                debug!("reset connection; token={:?}", token);
             }
-        }
-
-        for token in reset_tokens {
-            match self.conns.remove(token) {
-                Some(_c) => {
-                    debug!("reset connection; token={:?}", token);
-                }
-                None => {
-                    warn!("Unable to remove connection for {:?}", token);
-                }
+            None => {
+                warn!("Unable to remove connection for {:?}", token);
             }
         }
     }
@@ -123,17 +102,22 @@ impl Server {
     fn ready(&mut self, poll: &mut Poll, token: Token, event: Ready) {
         debug!("{:?} event = {:?}", token, event);
 
+        if self.token != token && self.conns.contains(token) == false {
+            debug!("Failed to find connection for {:?}", token);
+            return;
+        }
+
         let event = UnixReady::from(event);
 
         if event.is_error() {
             warn!("Error event for {:?}", token);
-            self.find_connection_by_token(token).mark_reset();
+            self.remove_token(token);
             return;
         }
 
         if event.is_hup() {
             trace!("Hup event for {:?}", token);
-            self.find_connection_by_token(token).mark_reset();
+            self.remove_token(token);
             return;
         }
 
@@ -145,18 +129,14 @@ impl Server {
             trace!("Write event for {:?}", token);
             assert!(self.token != token, "Received writable event for Server");
 
-            let conn = self.find_connection_by_token(token);
-
-            if conn.is_reset() {
-                info!("{:?} has already been reset", token);
-                return;
-            }
-
-            conn.writable()
-                .unwrap_or_else(|e| {
+            match self.connection(token).writable() {
+                Ok(()) => {},
+                Err(e) => {
                     warn!("Write event failed for {:?}, {:?}", token, e);
-                    conn.mark_reset();
-                });
+                    self.remove_token(token);
+                    return;
+                }
+            }
         }
 
         // A read event for our `Server` token means we are establishing a new connection. A read
@@ -166,22 +146,26 @@ impl Server {
             if self.token == token {
                 self.accept(poll);
             } else {
-
-                if self.find_connection_by_token(token).is_reset() {
-                    info!("{:?} has already been reset", token);
-                    return;
-                }
-
-                self.readable(token)
-                    .unwrap_or_else(|e| {
+                match self.readable(token) {
+                    Ok(()) => {},
+                    Err(e) => {
                         warn!("Read event failed for {:?}: {:?}", token, e);
-                        self.find_connection_by_token(token).mark_reset();
-                    });
+                        self.remove_token(token);
+                        return;
+                    }
+                }
             }
         }
 
         if self.token != token {
-            self.find_connection_by_token(token).mark_idle();
+            match self.connection(token).reregister(poll) {
+                Ok(()) => {},
+                Err(e) => {
+                    warn!("Reregister failed {:?}", e);
+                    self.remove_token(token);
+                    return;
+                }
+            }
         }
     }
 
@@ -209,7 +193,6 @@ impl Server {
 
             let token = match self.conns.vacant_entry() {
                 Some(entry) => {
-                    debug!("registering {:?} with poller", entry.index());
                     let c = Connection::new(sock, entry.index());
                     entry.insert(c).index()
                 }
@@ -219,11 +202,12 @@ impl Server {
                 }
             };
 
-            match self.find_connection_by_token(token).register(poll) {
+            debug!("registering {:?} with poller", token);
+            match self.connection(token).register(poll) {
                 Ok(_) => {},
                 Err(e) => {
                     error!("Failed to register {:?} connection with poller, {:?}", token, e);
-                    self.conns.remove(token);
+                    self.remove_token(token);
                 }
             }
         }
@@ -237,16 +221,12 @@ impl Server {
     fn readable(&mut self, token: Token) -> io::Result<()> {
         debug!("server conn readable; token={:?}", token);
 
-        while let Some(message) = try!(self.find_connection_by_token(token).readable()) {
+        while let Some(message) = self.connection(token).readable()? {
 
             let rc_message = Rc::new(message);
             // Queue up a write for all connected clients.
             for c in self.conns.iter_mut() {
-                c.send_message(rc_message.clone())
-                    .unwrap_or_else(|e| {
-                        error!("Failed to queue message for {:?}: {:?}", c.token, e);
-                        c.mark_reset();
-                    });
+                c.send_message(rc_message.clone());
             }
         }
 
@@ -254,7 +234,10 @@ impl Server {
     }
 
     /// Find a connection in the slab using the given token.
-    fn find_connection_by_token(&mut self, token: Token) -> &mut Connection {
+    ///
+    /// This function will panic if the token does not exist. Use self.conns.contains(token)
+    /// before using this function.
+    fn connection(&mut self, token: Token) -> &mut Connection {
         &mut self.conns[token]
     }
 }
