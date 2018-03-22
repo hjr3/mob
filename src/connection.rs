@@ -147,50 +147,7 @@ impl Connection {
         self.send_queue.pop()
             .ok_or(Error::new(ErrorKind::Other, "Could not pop send queue"))
             .and_then(|buf| {
-                match self.write_message_length(&buf) {
-                    Ok(None) => {
-                        // put message back into the queue so we can try again
-                        self.send_queue.push(buf);
-                        return Ok(());
-                    },
-                    Ok(Some(())) => {
-                        ()
-                    },
-                    Err(e) => {
-                        error!("Failed to send buffer for {:?}, error: {}", self.token, e);
-                        return Err(e);
-                    }
-                }
-
-                let len = buf.len();
-                match self.sock.write(&*buf) {
-                    Ok(n) => {
-                        debug!("CONN : we wrote {} bytes", n);
-                        // if we wrote a partial message, then put remaining part of message back
-                        // into the queue so we can try again
-                        if n < len {
-                            let remaining = Rc::new(buf[n..].to_vec());
-                            self.send_queue.push(remaining);
-                            self.write_continuation = true;
-                        } else {
-                            self.write_continuation = false;
-                        }
-                        Ok(())
-                    },
-                    Err(e) => {
-                        if e.kind() == ErrorKind::WouldBlock {
-                            debug!("client flushing buf; WouldBlock");
-
-                            // put message back into the queue so we can try again
-                            self.send_queue.push(buf);
-                            self.write_continuation = true;
-                            Ok(())
-                        } else {
-                            error!("Failed to send buffer for {:?}, error: {}", self.token, e);
-                            Err(e)
-                        }
-                    }
-                }
+                self.write_message(buf)
             })?;
 
         if self.send_queue.is_empty() {
@@ -234,19 +191,75 @@ impl Connection {
         }
     }
 
+    fn write_message(&mut self, buf: Rc<Vec<u8>>) -> io::Result<()> {
+        match self.write_message_length(&buf) {
+            Ok(None) => {
+                // put message back into the queue so we can try again
+                self.send_queue.push(buf);
+                return Ok(());
+            },
+            Ok(Some(())) => {
+                ()
+            },
+            Err(e) => {
+                error!("Failed to send buffer for {:?}, error: {}", self.token, e);
+                return Err(e);
+            }
+        }
+
+        let len = buf.len();
+        match self.sock.write(&*buf) {
+            Ok(n) => {
+                debug!("CONN : we wrote {} bytes", n);
+                // if we wrote a partial message, then put remaining part of message back
+                // into the queue so we can try again
+                if n < len {
+                    let remaining = Rc::new(buf[n..].to_vec());
+                    self.send_queue.push(remaining);
+                    self.write_continuation = true;
+                } else {
+                    self.write_continuation = false;
+                }
+                Ok(())
+            },
+            Err(e) => {
+                if e.kind() == ErrorKind::WouldBlock {
+                    debug!("client flushing buf; WouldBlock");
+
+                    // put message back into the queue so we can try again
+                    self.send_queue.push(buf);
+                    self.write_continuation = true;
+                    Ok(())
+                } else {
+                    error!("Failed to send buffer for {:?}, error: {}", self.token, e);
+                    Err(e)
+                }
+            }
+        }
+    }
+
     /// Queue an outgoing message to the client.
     ///
     /// This will cause the connection to register interests in write events with the poller.
     /// The connection can still safely have an interest in read events. The read and write buffers
     /// operate independently of each other.
-    pub fn send_message(&mut self, message: Rc<Vec<u8>>) {
+    pub fn send_message(&mut self, message: Rc<Vec<u8>>) -> io::Result<()> {
         trace!("connection send_message; token={:?}", self.token);
 
-        self.send_queue.push(message);
+        // if the queue is empty then try and write. if we get WouldBlock the message will get
+        // queued up for later. if the queue already has items in it, then we know that we got
+        // WouldBlock from a previous write, so queue it up and wait for the next write event.
+        if self.send_queue.is_empty() {
+            self.write_message(message)?;
+        } else {
+            self.send_queue.push(message);
+        }
 
-        if !self.interest.is_writable() {
+        if !self.send_queue.is_empty() && !self.interest.is_writable() {
             self.interest.insert(Ready::writable());
         }
+
+        Ok(())
     }
 
     /// Register interest in read events with poll.

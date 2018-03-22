@@ -224,9 +224,9 @@ impl Server {
         while let Some(message) = self.connection(token).readable()? {
 
             let rc_message = Rc::new(message);
-            // Queue up a write for all connected clients.
+            // Echo the message too all connected clients.
             for c in self.conns.iter_mut() {
-                c.send_message(rc_message.clone());
+                c.send_message(rc_message.clone())?;
             }
         }
 
