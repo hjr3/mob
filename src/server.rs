@@ -50,24 +50,19 @@ impl Server {
         loop {
             let cnt = poll.poll(&mut self.events, None)?;
 
-            let mut i = 0;
-
             trace!("processing events... cnt={}; len={}", cnt, self.events.len());
 
             // Iterate over the notifications. Each event provides the token
             // it was registered with (which usually represents, at least, the
             // handle that the event is about) as well as information about
             // what kind of event occurred (readable, writable, signal, etc.)
-            while i < cnt {
-                // TODO this would be nice if it would turn a Result type. trying to convert this
-                // into a io::Result runs into a problem because .ok_or() expects std::Result and
-                // not io::Result
-                let event = self.events.get(i).expect("Failed to get event");
+            for i in 0..cnt {
+                let event = self.events.get(i).ok_or_else(|| {
+                    io::Error::new(ErrorKind::Other, "Failed to get event")
+                })?;
 
                 trace!("event={:?}; idx={:?}", event, i);
                 self.ready(poll, event.token(), event.readiness());
-
-                i += 1;
             }
         }
     }
