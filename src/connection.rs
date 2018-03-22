@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io;
 use std::io::prelude::*;
 use std::io::{Error, ErrorKind};
@@ -23,8 +24,7 @@ pub struct Connection {
     interest: Ready,
 
     // messages waiting to be sent out
-    // TODO: should use VecDequeue?
-    send_queue: Vec<Rc<Vec<u8>>>,
+    send_queue: VecDeque<Rc<Vec<u8>>>,
 
     // track whether a read received `WouldBlock` and store the number of
     // byte we are supposed to read
@@ -41,7 +41,7 @@ impl Connection {
             sock: sock,
             token: token,
             interest: Ready::from(UnixReady::hup()),
-            send_queue: Vec::new(),
+            send_queue: VecDeque::with_capacity(32),
             read_continuation: None,
             write_continuation: false,
         }
@@ -144,7 +144,7 @@ impl Connection {
     /// flush until the kernel sends back EAGAIN?
     pub fn writable(&mut self) -> io::Result<()> {
 
-        self.send_queue.pop()
+        self.send_queue.pop_front()
             .ok_or(Error::new(ErrorKind::Other, "Could not pop send queue"))
             .and_then(|buf| {
                 self.write_message(buf)
@@ -195,7 +195,7 @@ impl Connection {
         match self.write_message_length(&buf) {
             Ok(None) => {
                 // put message back into the queue so we can try again
-                self.send_queue.push(buf);
+                self.send_queue.push_front(buf);
                 return Ok(());
             },
             Ok(Some(())) => {
@@ -215,7 +215,7 @@ impl Connection {
                 // into the queue so we can try again
                 if n < len {
                     let remaining = Rc::new(buf[n..].to_vec());
-                    self.send_queue.push(remaining);
+                    self.send_queue.push_front(remaining);
                     self.write_continuation = true;
                 } else {
                     self.write_continuation = false;
@@ -227,7 +227,7 @@ impl Connection {
                     debug!("client flushing buf; WouldBlock");
 
                     // put message back into the queue so we can try again
-                    self.send_queue.push(buf);
+                    self.send_queue.push_front(buf);
                     self.write_continuation = true;
                     Ok(())
                 } else {
@@ -252,7 +252,7 @@ impl Connection {
         if self.send_queue.is_empty() {
             self.write_message(message)?;
         } else {
-            self.send_queue.push(message);
+            self.send_queue.push_back(message);
         }
 
         if !self.send_queue.is_empty() && !self.interest.is_writable() {
