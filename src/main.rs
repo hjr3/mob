@@ -1,9 +1,4 @@
-extern crate byteorder;
-extern crate mio;
-extern crate slab;
-
-#[macro_use] extern crate log;
-extern crate env_logger;
+#![feature(rust_2018_preview)]
 
 mod server;
 mod connection;
@@ -13,7 +8,7 @@ use std::net::SocketAddr;
 use mio::Poll;
 use mio::net::TcpListener;
 
-use server::*;
+use crate::server::*;
 
 fn main() {
 

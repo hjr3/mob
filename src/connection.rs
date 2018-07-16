@@ -10,6 +10,8 @@ use mio::{Poll, PollOpt, Ready, Token};
 use mio::net::TcpStream;
 use mio::unix::UnixReady;
 
+use log::{log, error, warn, trace, debug};
+
 /// A stateful wrapper around a non-blocking stream. This connection is not
 /// the SERVER connection. This connection represents the client connections
 /// _accepted_ by the SERVER connection.
