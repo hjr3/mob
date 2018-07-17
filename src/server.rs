@@ -28,7 +28,7 @@ pub struct Server {
 impl Server {
     pub fn new(sock: TcpListener) -> Server {
         Server {
-            sock: sock,
+            sock,
 
             // Give our server token a number much larger than our slab capacity. The slab used to
             // track an internal offset, but does not anymore.
@@ -97,7 +97,7 @@ impl Server {
     fn ready(&mut self, poll: &mut Poll, token: Token, event: Ready) {
         debug!("{:?} event = {:?}", token, event);
 
-        if self.token != token && self.conns.contains(token) == false {
+        if self.token != token && !self.conns.contains(token) {
             debug!("Failed to find connection for {:?}", token);
             return;
         }

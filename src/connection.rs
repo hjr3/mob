@@ -38,8 +38,8 @@ pub struct Connection {
 impl Connection {
     pub fn new(sock: TcpStream, token: Token) -> Connection {
         Connection {
-            sock: sock,
-            token: token,
+            sock,
+            token,
             interest: Ready::from(UnixReady::hup()),
             send_queue: VecDeque::with_capacity(32),
             read_continuation: None,
@@ -145,7 +145,7 @@ impl Connection {
     pub fn writable(&mut self) -> io::Result<()> {
 
         self.send_queue.pop_front()
-            .ok_or(Error::new(ErrorKind::Other, "Could not pop send queue"))
+            .ok_or_else(|| Error::new(ErrorKind::Other, "Could not pop send queue"))
             .and_then(|buf| {
                 self.write_message(buf)
             })?;

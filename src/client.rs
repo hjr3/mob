@@ -2,7 +2,7 @@ extern crate byteorder;
 
 use std::io::prelude::*;
 use std::net::TcpStream;
-use std::thread;
+use std::{thread, time};
 
 use byteorder::{ByteOrder, BigEndian};
 
@@ -26,9 +26,9 @@ fn main() {
                 stream.write_all(msg.as_ref()).unwrap();
 
                 let mut buf = [0u8; 8];
-                stream.read(&mut buf).unwrap();
+                let _ = stream.read(&mut buf).unwrap();
 
-                let msg_len = BigEndian::read_u64(&mut buf);
+                let msg_len = BigEndian::read_u64(&buf);
                 println!("thread {}: Reading message length of {}", i, msg_len);
 
                 let mut r = [0u8; 256];
@@ -52,5 +52,7 @@ fn main() {
         });
     }
 
-    loop {}
+    loop {
+        thread::sleep(time::Duration::from_millis(1));
+    }
 }
