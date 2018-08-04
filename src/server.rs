@@ -5,9 +5,11 @@ use mio::{Events, Poll, PollOpt, Ready, Token};
 use mio::net::TcpListener;
 use mio::unix::UnixReady;
 
+use log::{log, error, warn, info, trace, debug};
+
 use slab;
 
-use connection::Connection;
+use crate::connection::Connection;
 
 type Slab<T> = slab::Slab<T, Token>;
 

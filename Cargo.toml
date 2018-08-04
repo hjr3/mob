@@ -1,7 +1,10 @@
+cargo-features = ["edition"]
+
 [package]
 name = "mob"
 version = "0.1.0"
 authors = ["Herman J. Radtke III <hermanradtke@gmail.com>"]
+edition = '2018'
 
 [dependencies]
 byteorder = "0.3"
